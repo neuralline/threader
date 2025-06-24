@@ -1,4 +1,4 @@
-// src/thread.ts - Functional thread executor replacement
+// src/thread.ts - Simplified functional thread executor
 import {performance} from 'perf_hooks'
 import type {Threader} from './threader'
 
@@ -29,13 +29,11 @@ export interface ThreadConfig {
 // ============================================================================
 
 /**
- * Execute single threader using its pre-computed execution plan
+ * Execute single threader directly - no overhead
  */
 const executeSingle = async <R>(threader: Threader<any, R>): Promise<R> => {
-  const {executionPlan, data} = threader
-
   try {
-    const result = await executionPlan.executor(data)
+    const result = await threader.fn(threader.data)
     return result as R
   } catch (error) {
     throw error
@@ -43,57 +41,14 @@ const executeSingle = async <R>(threader: Threader<any, R>): Promise<R> => {
 }
 
 /**
- * Execute multiple threaders with optimal strategy grouping
+ * Execute multiple threaders in parallel - pure Promise.all
  */
 const executeMultiple = async <R>(
   threaders: Array<Threader<any, R>>
 ): Promise<R[]> => {
-  // Group by execution strategy for efficiency
-  const nativeGroup: Array<{threader: Threader<any, R>; index: number}> = []
-  const rustGroup: Array<{threader: Threader<any, R>; index: number}> = []
-  const workerGroup: Array<{threader: Threader<any, R>; index: number}> = []
-
-  threaders.forEach((threader, index) => {
-    const item = {threader, index}
-    switch (threader.executionPlan.strategy) {
-      case 'native':
-        nativeGroup.push(item)
-        break
-      case 'rust':
-        rustGroup.push(item)
-        break
-      case 'worker':
-        workerGroup.push(item)
-        break
-    }
-  })
-
-  const results: Array<{index: number; result: R}> = []
-
-  // Execute native group (synchronous, fastest)
-  nativeGroup.forEach(({threader, index}) => {
-    const result = threader.executionPlan.executor(threader.data) as R
-    results.push({index, result})
-  })
-
-  // Execute Rust group (synchronous, fast)
-  rustGroup.forEach(({threader, index}) => {
-    const result = threader.executionPlan.executor(threader.data) as R
-    results.push({index, result})
-  })
-
-  // Execute worker group (async if needed)
-  const workerResults = await Promise.all(
-    workerGroup.map(async ({threader, index}) => {
-      const result = (await threader.executionPlan.executor(threader.data)) as R
-      return {index, result}
-    })
-  )
-  results.push(...workerResults)
-
-  // Sort back to original order
-  results.sort((a, b) => a.index - b.index)
-  return results.map(r => r.result)
+  // Simple parallel execution using Promise.all
+  const promises = threaders.map(t => executeSingle(t))
+  return Promise.all(promises)
 }
 
 // ============================================================================
@@ -101,7 +56,7 @@ const executeMultiple = async <R>(
 // ============================================================================
 
 /**
- * Functional thread executor implementation
+ * Simplified functional thread executor
  */
 export const thread = {
   /**

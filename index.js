@@ -310,8 +310,8 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { SimpleThreader, isRustAvailable, getSystemInfo } = nativeBinding
+const { MultiCoreExecutor, isMulticoreAvailable, getMulticoreInfo } = nativeBinding
 
-module.exports.SimpleThreader = SimpleThreader
-module.exports.isRustAvailable = isRustAvailable
-module.exports.getSystemInfo = getSystemInfo
+module.exports.MultiCoreExecutor = MultiCoreExecutor
+module.exports.isMulticoreAvailable = isMulticoreAvailable
+module.exports.getMulticoreInfo = getMulticoreInfo

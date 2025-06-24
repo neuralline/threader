@@ -119,33 +119,3 @@ export interface ThreadConfig {
   /** Memory transfer mode */
   transferMode?: 'auto' | 'clone' | 'transfer' | 'shared'
 }
-
-/**
- * Error thrown when function validation fails
- */
-export class ThreadValidationError extends Error {
-  constructor(message: string, public readonly functionString: string) {
-    super(`Function validation failed: ${message}`)
-    this.name = 'ThreadValidationError'
-  }
-}
-
-/**
- * Error thrown when thread execution times out
- */
-export class ThreadTimeoutError extends Error {
-  constructor(timeout: number) {
-    super(`Thread execution timed out after ${timeout}ms`)
-    this.name = 'ThreadTimeoutError'
-  }
-}
-
-/**
- * Error thrown when thread execution is cancelled
- */
-export class ThreadCancelledError extends Error {
-  constructor() {
-    super('Thread execution was cancelled')
-    this.name = 'ThreadCancelledError'
-  }
-}
