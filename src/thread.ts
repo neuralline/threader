@@ -1,9 +1,9 @@
 // src/thread.ts
+import {Threader} from './threader'
 import {
   ThreadExecutor,
   ThreadResult,
   ThreadResults,
-  Threader,
   ThreadConfig,
   ThreadTimeoutError,
   ThreadCancelledError
@@ -218,11 +218,11 @@ export class ThreadExecutorImpl implements ThreadExecutor {
       // Execute through worker manager
       const result = await this.workerManager.execute(processor)
 
-      processor._setResult(result)
+      processor._setResult(result as R)
 
       return {
         index,
-        result,
+        result: result as R,
         duration: Date.now() - startTime
       }
     } catch (error) {

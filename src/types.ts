@@ -1,4 +1,6 @@
 // src/types.ts
+import {Threader} from './threader'
+
 /**
  * Function that can be executed in parallel across multiple threads
  */
@@ -42,29 +44,6 @@ export interface ThreadController {
   readonly result?: unknown
   /** Error information if failed */
   readonly error?: Error
-}
-
-/**
- * A unit of parallel work containing function and data
- */
-export class Threader<T, R> {
-  constructor(
-    public readonly fn: ThreadFunction<T, R>,
-    public readonly data: T,
-    public readonly options?: ThreadOptions
-  ) {}
-
-  /** Cancel this specific threader instance */
-  cancel(): Promise<void>
-
-  /** Get current execution status */
-  get status(): ThreadStatus
-
-  /** Get execution result (available when status is 'completed') */
-  get result(): R | undefined
-
-  /** Get error information (available when status is 'error') */
-  get error(): Error | undefined
 }
 
 /**
