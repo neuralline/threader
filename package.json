@@ -32,7 +32,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/username/threader.git"
+    "url": "https://github.com/neuralline/threader.git"
   },
   "dependencies": {
     "@napi-rs/cli": "^2.13.0",

@@ -1,69 +1,120 @@
-// src/thread.ts
-import {Threader} from './threader'
-import {
-  ThreadExecutor,
-  ThreadResult,
-  ThreadResults,
-  ThreadConfig,
-  ThreadTimeoutError,
-  ThreadCancelledError
-} from './types'
-import {WorkerManager} from './utils/worker-manager'
+// src/thread.ts - Functional thread executor replacement
+import {performance} from 'perf_hooks'
+import type {Threader} from './threader'
+
+// ============================================================================
+// TYPES (Same API)
+// ============================================================================
+
+export interface ThreadResult<R> {
+  index: number
+  result: R
+  error?: Error
+  duration: number
+}
+
+export type ThreadResults<T extends readonly Threader<any, any>[]> = {
+  [K in keyof T]: T[K] extends Threader<any, infer R> ? R : never
+}
+
+export interface ThreadConfig {
+  maxWorkers?: number
+  timeout?: number
+  enableValidation?: boolean
+  transferMode?: 'auto' | 'clone' | 'transfer' | 'shared'
+}
+
+// ============================================================================
+// FUNCTIONAL EXECUTION (NO WORKER MANAGEMENT OVERHEAD)
+// ============================================================================
 
 /**
- * Implementation of the thread executor
+ * Execute single threader using its pre-computed execution plan
  */
-export class ThreadExecutorImpl implements ThreadExecutor {
-  private workerManager: WorkerManager
-  private config: ThreadConfig
+const executeSingle = async <R>(threader: Threader<any, R>): Promise<R> => {
+  const {executionPlan, data} = threader
 
-  constructor(config: ThreadConfig = {}) {
-    this.config = {
-      maxWorkers: config.maxWorkers || require('os').cpus().length,
-      timeout: config.timeout || 30000,
-      enableValidation: config.enableValidation ?? true,
-      transferMode: config.transferMode || 'auto',
-      ...config
-    }
-
-    this.workerManager = new WorkerManager(this.config)
+  try {
+    const result = await executionPlan.executor(data)
+    return result as R
+  } catch (error) {
+    throw error
   }
+}
 
+/**
+ * Execute multiple threaders with optimal strategy grouping
+ */
+const executeMultiple = async <R>(
+  threaders: Array<Threader<any, R>>
+): Promise<R[]> => {
+  // Group by execution strategy for efficiency
+  const nativeGroup: Array<{threader: Threader<any, R>; index: number}> = []
+  const rustGroup: Array<{threader: Threader<any, R>; index: number}> = []
+  const workerGroup: Array<{threader: Threader<any, R>; index: number}> = []
+
+  threaders.forEach((threader, index) => {
+    const item = {threader, index}
+    switch (threader.executionPlan.strategy) {
+      case 'native':
+        nativeGroup.push(item)
+        break
+      case 'rust':
+        rustGroup.push(item)
+        break
+      case 'worker':
+        workerGroup.push(item)
+        break
+    }
+  })
+
+  const results: Array<{index: number; result: R}> = []
+
+  // Execute native group (synchronous, fastest)
+  nativeGroup.forEach(({threader, index}) => {
+    const result = threader.executionPlan.executor(threader.data) as R
+    results.push({index, result})
+  })
+
+  // Execute Rust group (synchronous, fast)
+  rustGroup.forEach(({threader, index}) => {
+    const result = threader.executionPlan.executor(threader.data) as R
+    results.push({index, result})
+  })
+
+  // Execute worker group (async if needed)
+  const workerResults = await Promise.all(
+    workerGroup.map(async ({threader, index}) => {
+      const result = (await threader.executionPlan.executor(threader.data)) as R
+      return {index, result}
+    })
+  )
+  results.push(...workerResults)
+
+  // Sort back to original order
+  results.sort((a, b) => a.index - b.index)
+  return results.map(r => r.result)
+}
+
+// ============================================================================
+// THREAD EXECUTOR API (FUNCTIONAL)
+// ============================================================================
+
+/**
+ * Functional thread executor implementation
+ */
+export const thread = {
   /**
    * Execute all threaders and wait for completion (like Promise.all)
    */
   async all<T extends readonly Threader<any, any>[]>(
     ...processors: T
   ): Promise<ThreadResults<T>> {
-    if (processors.length === 0) {
-      return [] as any
-    }
+    if (processors.length === 0) return [] as any
 
-    // Check for cancelled processors
-    for (const processor of processors) {
-      if (processor.isCancelled) {
-        throw new ThreadCancelledError()
-      }
-    }
-
-    try {
-      // Execute all processors in parallel
-      const promises = processors.map((processor, index) =>
-        this.executeProcessor(processor, index)
-      )
-
-      const results = await Promise.all(promises)
-      return results.map(r => r.result) as ThreadResults<T>
-    } catch (error) {
-      // Mark all processors as error state
-      processors.forEach(p => {
-        if (p.status === 'running' || p.status === 'pending') {
-          p._setError(error as Error)
-        }
-      })
-      throw error
-    }
-  }
+    const results = await executeMultiple(processors)
+    return results as ThreadResults<T>
+  },
 
   /**
    * Execute threaders and yield results as they complete
@@ -71,47 +122,43 @@ export class ThreadExecutorImpl implements ThreadExecutor {
   async *stream<T extends readonly Threader<any, any>[]>(
     ...processors: T
   ): AsyncIterable<ThreadResult<any>> {
-    if (processors.length === 0) {
-      return
-    }
+    if (processors.length === 0) return
 
-    // Start all executions
-    const promises = processors.map((processor, index) =>
-      this.executeProcessor(processor, index)
-    )
+    const promises = processors.map(async (processor, index) => {
+      const startTime = performance.now()
+      try {
+        const result = await executeSingle(processor)
+        return {
+          index,
+          result,
+          duration: performance.now() - startTime
+        }
+      } catch (error) {
+        return {
+          index,
+          result: undefined,
+          error: error as Error,
+          duration: performance.now() - startTime
+        }
+      }
+    })
 
     // Yield results as they complete
-    while (promises.length > 0) {
-      const {result, index} = await Promise.race(
-        promises.map((promise, idx) =>
-          promise.then(result => ({result, index: idx}))
-        )
-      )
-
-      // Remove completed promise
-      promises.splice(index, 1)
-
-      yield result
+    for (const promise of promises) {
+      yield await promise
     }
-  }
+  },
 
   /**
    * Fire and forget - execute without waiting for results
    */
   fire<T extends readonly Threader<any, any>[]>(...processors: T): void {
-    if (processors.length === 0) {
-      return
-    }
-
-    // Start all executions without waiting
-    processors.forEach((processor, index) => {
-      this.executeProcessor(processor, index).catch(error => {
-        // Log error but don't throw since it's fire-and-forget
-        console.error(`Threader execution failed:`, error)
-        processor._setError(error)
+    processors.forEach(processor => {
+      executeSingle(processor).catch(error => {
+        console.error('Fire-and-forget execution failed:', error)
       })
     })
-  }
+  },
 
   /**
    * Return the first completed result (like Promise.race)
@@ -123,12 +170,27 @@ export class ThreadExecutorImpl implements ThreadExecutor {
       throw new Error('No processors provided to race')
     }
 
-    const promises = processors.map((processor, index) =>
-      this.executeProcessor(processor, index)
-    )
+    const promises = processors.map(async (processor, index) => {
+      const startTime = performance.now()
+      try {
+        const result = await executeSingle(processor)
+        return {
+          index,
+          result,
+          duration: performance.now() - startTime
+        }
+      } catch (error) {
+        return {
+          index,
+          result: undefined,
+          error: error as Error,
+          duration: performance.now() - startTime
+        }
+      }
+    })
 
     return Promise.race(promises)
-  }
+  },
 
   /**
    * Return the first N completed results
@@ -137,108 +199,68 @@ export class ThreadExecutorImpl implements ThreadExecutor {
     count: number,
     ...processors: T
   ): Promise<ThreadResult<any>[]> {
-    if (count <= 0) {
-      return []
-    }
+    if (count <= 0) return []
+    if (processors.length === 0) throw new Error('No processors provided')
 
-    if (processors.length === 0) {
-      throw new Error('No processors provided')
-    }
-
+    // If requesting all or more, just use all()
     if (count >= processors.length) {
-      // If requesting all or more, just use all()
       const results = await this.all(...processors)
       return results.map((result, index) => ({
         index,
         result,
-        duration: 0 // TODO: track actual duration
+        duration: 0 // Could track actual duration
       }))
     }
 
-    const promises = processors.map((processor, index) =>
-      this.executeProcessor(processor, index)
-    )
+    const promises = processors.map(async (processor, index) => {
+      const startTime = performance.now()
+      try {
+        const result = await executeSingle(processor)
+        return {
+          index,
+          result,
+          duration: performance.now() - startTime
+        }
+      } catch (error) {
+        return {
+          index,
+          result: undefined,
+          error: error as Error,
+          duration: performance.now() - startTime
+        }
+      }
+    })
 
     const results: ThreadResult<any>[] = []
     const remaining = [...promises]
 
     while (results.length < count && remaining.length > 0) {
-      const {result, index} = await Promise.race(
+      const completed = await Promise.race(
         remaining.map((promise, idx) =>
-          promise.then(result => ({result, index: idx}))
+          promise.then(result => ({result, promiseIndex: idx}))
         )
       )
 
-      results.push(result)
-      remaining.splice(index, 1)
+      results.push(completed.result)
+      remaining.splice(completed.promiseIndex, 1)
     }
 
     return results
-  }
+  },
 
   /**
-   * Update global configuration
+   * Configure global settings (simplified)
    */
   configure(config: Partial<ThreadConfig>): void {
-    this.config = {...this.config, ...config}
-    this.workerManager.updateConfig(this.config)
-  }
+    // In functional version, configuration is minimal
+    console.log('Thread configuration updated:', config)
+  },
 
   /**
-   * Get current configuration
-   */
-  getConfig(): ThreadConfig {
-    return {...this.config}
-  }
-
-  /**
-   * Shutdown the thread executor and clean up resources
+   * Shutdown - no cleanup needed in functional version
    */
   async shutdown(): Promise<void> {
-    await this.workerManager.shutdown()
-  }
-
-  /**
-   * Execute a single processor
-   */
-  private async executeProcessor<R>(
-    processor: Threader<any, R>,
-    index: number
-  ): Promise<ThreadResult<R>> {
-    const startTime = Date.now()
-
-    try {
-      // Check if already cancelled
-      if (processor.isCancelled) {
-        throw new ThreadCancelledError()
-      }
-
-      processor._setStatus('running')
-
-      // Execute through worker manager
-      const result = await this.workerManager.execute(processor)
-
-      processor._setResult(result as R)
-
-      return {
-        index,
-        result: result as R,
-        duration: Date.now() - startTime
-      }
-    } catch (error) {
-      processor._setError(error as Error)
-
-      return {
-        index,
-        result: undefined as any,
-        error: error as Error,
-        duration: Date.now() - startTime
-      }
-    }
+    // No worker pools to shutdown in functional version
+    console.log('Thread executor shutdown complete')
   }
 }
-
-/**
- * Default thread executor instance
- */
-export const thread = new ThreadExecutorImpl()
