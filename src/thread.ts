@@ -44,7 +44,7 @@ const executeSingle = async <R>(threader: Threader<any, R>): Promise<R> => {
  * Execute multiple threaders in parallel - pure Promise.all
  */
 const executeMultiple = async <R>(
-  threaders: Array<Threader<any, R>>
+  threaders: readonly Threader<any, R>[]
 ): Promise<R[]> => {
   // Simple parallel execution using Promise.all
   const promises = threaders.map(t => executeSingle(t))
@@ -72,17 +72,20 @@ export const thread = {
   },
 
   /**
-   * Execute threaders and yield results as they complete
+   * Stream results as they complete - PURE INDIVIDUAL EXECUTION
    */
   async *stream<T extends readonly Threader<any, any>[]>(
     ...processors: T
   ): AsyncIterable<ThreadResult<any>> {
     if (processors.length === 0) return
 
-    const promises = processors.map(async (processor, index) => {
+    // BYPASS ALL BATCHING - Execute each processor completely independently
+    const individualPromises = processors.map(async (processor, index) => {
       const startTime = performance.now()
+
       try {
-        const result = await executeSingle(processor)
+        // DIRECT EXECUTION - No routing through executeOptimally or any batch system
+        const result = await processor.fn(processor.data)
         return {
           index,
           result,
@@ -98,9 +101,23 @@ export const thread = {
       }
     })
 
-    // Yield results as they complete
-    for (const promise of promises) {
-      yield await promise
+    // Race the individual promises as they complete
+    let remaining = individualPromises.map((promise, originalIndex) => ({
+      promise,
+      originalIndex
+    }))
+
+    while (remaining.length > 0) {
+      const completed = await Promise.race(
+        remaining.map(({promise, originalIndex}, arrayIndex) =>
+          promise.then(result => ({result, arrayIndex, originalIndex}))
+        )
+      )
+
+      yield completed.result
+
+      // Remove the completed promise from remaining array
+      remaining.splice(completed.arrayIndex, 1)
     }
   },
 

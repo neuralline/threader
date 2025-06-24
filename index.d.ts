@@ -7,7 +7,7 @@
 export declare function isMulticoreAvailable(): boolean
 /** Get system information */
 export declare function getMulticoreInfo(): string
-/** Multi-core executor with enhanced JavaScript simulation */
+/** Enhanced multi-core executor with smart JavaScript handling */
 export declare class MultiCoreExecutor {
   /** Create a new multi-core executor */
   constructor(workerCount?: number | undefined | null)

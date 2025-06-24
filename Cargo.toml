@@ -1,9 +1,9 @@
-# Cargo.toml
+# Cargo.toml - V8-powered Threader
 [package]
 name = "threader"
-version = "0.1.0"
-edition = "2021"
-description = "Multi-core JavaScript parallelism engine"
+version = "0.2.0"
+edition = "2024"
+description = "Multi-core JavaScript parallelism engine with V8"
 license = "MIT"
 repository = "https://github.com/username/threader"
 
@@ -11,9 +11,11 @@ repository = "https://github.com/username/threader"
 crate-type = ["cdylib"]
 
 [dependencies]
-# NAPI bindings for Node.js integration - using older stable version
+# NAPI bindings for Node.js integration
 napi = { version = "2.16", default-features = false, features = ["napi4", "tokio_rt"] }
 napi-derive = "2.16"
+
+# V8 JavaScript engine
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -28,12 +30,15 @@ num_cpus = "1.16"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Utilities
+# Error handling
 thiserror = "1.0"
+
+# Logging
 tracing = "0.1"
-quickjs = "0.1.0"
-reqwest = "0.12.20"
+
+# Time handling
 chrono = "0.4.41"
+rusty_v8 = "0.32.1"
 
 [build-dependencies]
 napi-build = "2.2.1"
@@ -43,8 +48,13 @@ napi-build = "2.2.1"
 lto = true
 codegen-units = 1
 panic = "abort"
+opt-level = 3
 
 [profile.dev]
 # Faster compilation during development
 opt-level = 0
 debug = true
+
+# V8 specific build configuration
+[target.'cfg(target_os = "windows")']
+rustflags = ["-C", "target-feature=+crt-static"]
