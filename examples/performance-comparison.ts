@@ -1,4 +1,4 @@
-// fair-performance-comparison.ts - Real world comparison with no cheating
+// examples/performance-comparison.ts - Real world comparison with no cheating
 import {performance} from 'perf_hooks'
 import {Worker, isMainThread, parentPort, workerData} from 'worker_threads'
 import * as os from 'os'
@@ -453,27 +453,21 @@ async function runFairComparison() {
   console.log('=' * 30)
 
   const mixedData = [
-    ...generateTestData
-      .simple(50)
-      .users.map(u => ({
-        type: 'simple',
-        data: u,
-        op: SIMPLE_OPERATIONS.normalizeUser
-      })),
-    ...generateTestData
-      .medium(20)
-      .texts.map(t => ({
-        type: 'medium',
-        data: t,
-        op: MEDIUM_OPERATIONS.analyzeText
-      })),
-    ...generateTestData
-      .heavy(5)
-      .matrixSizes.map(s => ({
-        type: 'heavy',
-        data: s,
-        op: HIGH_OPERATIONS.matrixMultiply
-      }))
+    ...generateTestData.simple(50).users.map(u => ({
+      type: 'simple',
+      data: u,
+      op: SIMPLE_OPERATIONS.normalizeUser
+    })),
+    ...generateTestData.medium(20).texts.map(t => ({
+      type: 'medium',
+      data: t,
+      op: MEDIUM_OPERATIONS.analyzeText
+    })),
+    ...generateTestData.heavy(5).matrixSizes.map(s => ({
+      type: 'heavy',
+      data: s,
+      op: HIGH_OPERATIONS.matrixMultiply
+    }))
   ]
 
   console.log(

@@ -1,24 +1,40 @@
-# Threader - Multi-Core JavaScript Parallelism Plugin
+# Threader
+
+> Neural Line - True Multi-Core JavaScript Parallelism.
+
+> **THREADER** ~/`threh·duh`/  
+> Version 0.1.0
 
 ## Overview
 
-Threader is a revolutionary JavaScript library that enables **true multi-core parallelism** for CPU-intensive tasks. It provides a simple, Promise-like API for distributing pure functions across available CPU cores, delivering **enterprise-grade performance** with **zero configuration**.
+Threader enables **genuine multi-core parallelism** for JavaScript applications by distributing complete V8 instances across CPU cores. Built for **heavy computational workloads** where true parallel processing delivers significant performance gains.
 
-## 🚀 Performance Highlights
+## Performance Highlights
 
-- **8,475+ tasks/second** sustained throughput
-- **0.12ms average latency** per task
-- **Linear scaling** up to 1000+ concurrent tasks
-- **Hybrid Rust/JavaScript execution** for optimal performance
-- **Sub-millisecond time-to-first-result** with streaming
+- **True multi-core execution** across all available CPU cores
+- **2-4x speedup** for CPU-intensive operations taking >100ms
+- **~100 operations/second** sustained throughput with 10ms coordination overhead
+- **Linear scaling** with heavy workloads (proven with 32s → 15s improvements)
+- **Hybrid Rust + JavaScript** execution for optimal performance
 
-## Core Concept
+## Core Philosophy
 
-**Simple Mental Model**: "For loop + async Promise but on multi-core"
+**"2-Phase Optimization: Prepare Once, Execute Fast"**
 
-- `threader()` - Creates a unit of parallel work (function + data)
-- `thread.*` - Executes units with different strategies (all, stream, fire, race)
-- Each execution runs independently with no shared state (pure functional)
+### Phase 1: `threader()` - Preparation & Optimization
+
+- Function analysis and JIT optimization hints
+- Binary protocol data serialization
+- Adaptive batching strategy calculation
+- Backend routing decisions (Rust vs JavaScript workers)
+- Hot function detection and caching
+
+### Phase 2: `thread.*` - Optimized Execution
+
+- Lightning-fast execution using pre-optimized data
+- True parallelism across CPU cores
+- Smart routing based on optimization hints
+- Performance learning for future improvements
 
 ## Quick Start
 
@@ -29,15 +45,43 @@ npm install threader
 ```javascript
 import {threader, thread} from 'threader'
 
-// Create parallel work units
-const processor1 = threader(x => x * 2, 10)
-const processor2 = threader(x => x + 5, 20)
-const processor3 = threader(x => x.toUpperCase(), 'hello')
+// Phase 1: Create optimized processors (prepare once)
+const processor1 = threader(x => heavyComputation(x), data1)
+const processor2 = threader(x => complexAnalysis(x), data2)
+const processor3 = threader(x => imageProcessing(x), data3)
 
-// Execute with different strategies
+// Phase 2: Execute across cores (fast execution)
 const results = await thread.all(processor1, processor2, processor3)
-console.log(results) // [20, 25, 'HELLO']
+console.log(results) // [result1, result2, result3]
 ```
+
+## Real-World Performance
+
+### Proven Performance Gains
+
+```javascript
+// Matrix Operations: 2.2x speedup
+Sequential: 32.8s → Parallel: 15.2s (17.6s saved)
+
+// Image Processing: 2.0x speedup
+Sequential: 19.0s → Parallel: 9.7s (9.3s saved)
+
+// Data Analysis: 1.9x speedup
+Sequential: 11.3s → Parallel: 5.8s (5.5s saved)
+
+// Monte Carlo Simulations: 2.1x speedup
+Sequential: 2.8s → Parallel: 1.4s (1.5s saved)
+
+// Overall: 105% faster (33.8s total time saved)
+```
+
+### Throughput Characteristics
+
+- **Sustained throughput**: ~100 operations/second
+- **Coordination overhead**: ~10ms per operation
+- **Break-even point**: Operations taking >10ms each
+- **Sweet spot**: Operations taking >100ms each
+- **Maximum efficiency**: 2-4x speedup on multi-core systems
 
 ## API Reference
 
@@ -58,8 +102,8 @@ Process results as they complete (async iterator)
 
 ```javascript
 for await (const result of thread.stream(processor1, processor2, processor3)) {
-  console.log('Completed:', result)
-  // Handle results progressively
+  console.log('Completed:', result.result)
+  // Handle results progressively as they finish
 }
 ```
 
@@ -90,27 +134,128 @@ const firstTwo = await thread.any(2, processor1, processor2, processor3)
 // Returns: [result1, result2] (first two to complete)
 ```
 
-### Advanced Features
+## When to Use Threader
 
-#### Cancellation Support
-
-```javascript
-const controller = await thread.all(processor1, processor2)
-controller.cancel()
-
-// Individual cancellation
-processor1.cancel()
-```
-
-#### Status Monitoring
+### ✅ EXCELLENT Use Cases (2-4x speedup)
 
 ```javascript
-console.log(processor1.status) // 'pending', 'running', 'completed', 'cancelled'
-console.log(processor1.result) // Result when completed
-console.log(processor1.error) // Error if failed
+// Prime number generation (CPU-intensive)
+const primeProcessor = threader(
+  range => generatePrimes(range.start, range.end),
+  {start: 100000, end: 200000}
+)
+
+// Image processing (heavy filters)
+const imageProcessor = threader(
+  imageData => applyComplexFilters(imageData),
+  largeImageBuffer
+)
+
+// Mathematical computations (matrix operations)
+const matrixProcessor = threader(
+  matrices => multiplyLargeMatrices(matrices.a, matrices.b),
+  {a: matrix1000x1000, b: matrix1000x1000}
+)
+
+// Data analysis (statistical computations)
+const analysisProcessor = threader(
+  dataset => complexStatisticalAnalysis(dataset),
+  millionDataPoints
+)
+
+// Monte Carlo simulations
+const simulationProcessor = threader(
+  params => runMonteCarloSimulation(params.iterations),
+  {iterations: 10000000}
+)
 ```
 
-#### Configuration
+**Characteristics**: Operations taking >100ms each, CPU-bound, parallelizable
+
+### ⚠️ AVOID For (87,000x overhead)
+
+```javascript
+// ❌ Simple arithmetic
+threader(x => x * 2, 10) // Use: x * 2
+
+// ❌ Basic string operations
+threader(s => s.toUpperCase(), 'hi') // Use: s.toUpperCase()
+
+// ❌ Small array operations
+threader(arr => arr.sum(), [1, 2, 3]) // Use: arr.reduce()
+
+// ❌ I/O operations
+threader(url => fetch(url), '/api') // Use: Promise.all()
+```
+
+**Characteristics**: Operations taking <10ms each, I/O-bound, simple computations
+
+## Performance Guidelines
+
+### Decision Framework
+
+1. **Is it CPU-intensive?** (Yes = consider Threader)
+2. **Does each operation take >10ms?** (Yes = good candidate)
+3. **Do you have multiple independent tasks?** (Yes = parallel benefit)
+4. **Is it I/O bound?** (Yes = use Promise.all instead)
+
+### Optimal Usage Patterns
+
+```javascript
+// ✅ Batch heavy operations
+const processors = heavyDatasets.map(data => threader(complexAnalysis, data))
+const results = await thread.all(...processors)
+
+// ✅ Reuse processors for repeated work
+const imageProcessor = threader(processImage, imageConfig)
+const batch1 = await thread.all(...images1.map(() => imageProcessor))
+const batch2 = await thread.all(...images2.map(() => imageProcessor))
+
+// ✅ Stream results for progressive feedback
+for await (const result of thread.stream(...processors)) {
+  updateProgressBar(result)
+  handleResult(result.result)
+}
+```
+
+### Performance Expectations
+
+| Operation Duration | Threader Overhead | Recommendation         |
+| ------------------ | ----------------- | ---------------------- |
+| <1ms               | 10,000%+          | ❌ Never use           |
+| 1-10ms             | 100-1000%         | ❌ Too much overhead   |
+| 10-50ms            | 20-100%           | ⚠️ Marginal benefit    |
+| 50-100ms           | 10-20%            | ✅ Good candidate      |
+| >100ms             | <10%              | ✅ Excellent candidate |
+
+## Architecture
+
+### 2-Phase Optimization Pipeline
+
+**Phase 1 (`threader()`)**: Preparation happens once
+
+- Binary protocol analysis and data pre-serialization
+- Function analysis with JIT optimization hints
+- Adaptive batching strategy calculation
+- Backend routing decisions (Rust vs JavaScript workers)
+- Hot function detection and performance caching
+
+**Phase 2 (`thread.*`)**: Optimized execution happens fast
+
+- Smart routing based on pre-calculated optimization hints
+- True parallelism using worker threads across CPU cores
+- Performance learning and adaptation over time
+
+### Backend Architecture
+
+- **🦀 Rust coordination layer**: Ultra-fast task distribution and management
+- **🟨 V8 worker instances**: Full JavaScript environment per CPU core
+- **📦 Complete library support**: All npm packages work normally
+- **🔄 Automatic fallback**: JavaScript workers if Rust backend unavailable
+
+## Advanced Features
+
+### Configuration
 
 ```javascript
 // Global configuration
@@ -123,184 +268,126 @@ thread.configure({
 // Per-task configuration
 const processor = threader(func, data, {
   timeout: 10000,
-  priority: 'high',
-  retries: 3
+  preferBinary: true,
+  batchHint: 'large'
 })
 ```
 
-## Architecture
-
-### Hybrid Execution Engine
-
-Threader automatically routes functions for optimal performance:
-
-- **🦀 Simple functions** → **Rust backend** (microsecond execution)
-- **🟨 Complex functions** → **JavaScript workers** (full flexibility)
+### Performance Monitoring
 
 ```javascript
-// These use Rust acceleration (sub-millisecond)
-threader(x => x * 2, 5)
-threader(x => x + 10, 20)
-threader(x => x.toUpperCase(), 'hello')
+// Get optimization statistics
+const stats = thread.getOptimizationStats()
+console.log(stats.cacheStats) // Function analysis cache info
+console.log(stats.hotFunctions) // Hot function detection
 
-// These use JS workers (full JavaScript capabilities)
-threader(arr => arr.reduce((a, b) => a + b, 0), [1, 2, 3, 4])
-threader(obj => ({...obj, processed: true}), {id: 1})
+// Benchmark your functions
+const benchmark = benchmark(myFunction, testData, 1000)
+console.log(benchmark.direct.opsPerSec) // Direct execution speed
 ```
 
-### Core Components
-
-1. **Worker Pool Manager**: Efficient thread pool management
-2. **Smart Task Router**: Automatic Rust vs JavaScript selection
-3. **Queue Management**: High-performance task distribution
-4. **Function Validator**: Ensures pure function safety
-5. **Execution Controller**: Multiple execution strategies
-
-## Real-World Performance
-
-### Web Server Simulation
-
-```javascript
-// Handle 200 requests/second with mixed complexity
-const requests = generateWebRequests(200)
-const processors = requests.map(req => threader(processRequest, req))
-
-// Progressive results as they complete
-for await (const response of thread.stream(...processors)) {
-  sendResponse(response.result)
-}
-```
-
-### Data Processing Pipeline
-
-```javascript
-// Process 1M data points in parallel
-const dataChunks = chunkData(millionDataPoints, 1000)
-const processors = dataChunks.map(chunk => threader(processDataChunk, chunk))
-
-const results = await thread.all(...processors)
-// Completed in ~200ms with 8-core CPU
-```
-
-### Image Processing
-
-```javascript
-// Parallel image filters
-const filters = [
-  threader(applyBrightness, imageData),
-  threader(applyContrast, imageData),
-  threader(applyBlur, imageData)
-]
-
-const processedImages = await thread.all(...filters)
-```
-
-## Pure Function Requirements
-
-### ✅ Allowed Operations
-
-- Mathematical computations
-- Data transformations
-- String/array/object manipulation
-- JSON parsing/serialization
-- Regular expressions
-- Deterministic algorithms
-
-### ❌ Prohibited Operations
-
-- Console output (in production)
-- Network requests (fetch, XMLHttpRequest)
-- File system operations
-- DOM manipulation
-- Global variable access
-- Timer functions (setTimeout, setInterval)
-- Non-deterministic functions (Math.random, Date.now)
-
-### Validation
-
-```javascript
-// ✅ Valid pure functions
-threader(x => x * 2, 5)
-threader(arr => arr.filter(x => x > 0), [-1, 0, 1, 2])
-threader(str => str.toLowerCase(), 'HELLO')
-
-// ❌ Invalid functions (will throw ThreadValidationError)
-threader(x => {
-  console.log(x)
-  return x
-}, 5) // Side effect
-threader(x => fetch('/api/data'), 'url') // Network request
-threader(x => Math.random() * x, 10) // Non-deterministic
-```
-
-## Performance Benchmarks
-
-### Throughput Tests
-
-- **Simple operations**: 8,475+ tasks/second
-- **Mixed workloads**: 3,937+ tasks/second
-- **Complex computations**: 2,000+ tasks/second
-
-### Latency Tests
-
-- **Rust-accelerated**: 0.02-0.06ms per task
-- **JavaScript workers**: 1-10ms per task
-- **Time to first result**: <1ms (streaming)
-
-### Scaling Tests
-
-- **Linear scaling** up to 1000+ concurrent tasks
-- **No saturation point** found in testing
-- **Perfect CPU utilization** across all cores
-
-### Real-World Scenarios
-
-```javascript
-// Mandelbrot fractal: 480,000 pixels in 281ms
-// Matrix multiplication: 200x200 in 35ms
-// Prime generation: 1M numbers in 2.5s
-// Hash computation: 10,000 hashes in 233ms
-```
-
-## Error Handling
-
-### Built-in Error Types
+### Error Handling
 
 ```javascript
 try {
-  await thread.all(processor1, processor2)
+  const results = await thread.all(processor1, processor2)
 } catch (error) {
   if (error instanceof ThreadValidationError) {
     console.log('Function validation failed:', error.message)
   } else if (error instanceof ThreadTimeoutError) {
     console.log('Task timed out:', error.message)
-  } else if (error instanceof ThreadCancelledError) {
-    console.log('Task was cancelled:', error.message)
   }
 }
 ```
 
-### Graceful Degradation
+## Real-World Examples
 
-- Automatic fallback to JavaScript workers if Rust unavailable
-- Worker crash recovery with automatic replacement
-- Queue overflow protection with backpressure
-- Memory pressure handling
+### Heavy Mathematical Computation
 
-## Platform Support
+```javascript
+// Parallel prime number generation across ranges
+const primeRanges = [
+  {start: 1, end: 100000},
+  {start: 100001, end: 200000},
+  {start: 200001, end: 300000},
+  {start: 300001, end: 400000}
+]
 
-### Node.js Support
+const primeProcessors = primeRanges.map(range =>
+  threader(r => {
+    const primes = []
+    for (let num = r.start; num <= r.end; num++) {
+      let isPrime = true
+      for (let i = 2; i <= Math.sqrt(num); i++) {
+        if (num % i === 0) {
+          isPrime = false
+          break
+        }
+      }
+      if (isPrime) primes.push(num)
+    }
+    return primes
+  }, range)
+)
 
-- **Node.js 16+** (primary target)
-- **Cross-platform**: macOS, Linux, Windows
-- **Multi-architecture**: x64, ARM64
-- **Rust acceleration** on supported platforms
+// 2.2x speedup: 32.8s → 15.2s
+const allPrimes = await thread.all(...primeProcessors)
+```
 
-### Environment Detection
+### Image Processing Pipeline
 
-- Automatic Rust backend detection
-- Graceful fallback to JavaScript-only mode
-- Zero-configuration setup
+```javascript
+// Parallel image processing with heavy filters
+const imageProcessors = images.map(imageData =>
+  threader(img => {
+    // Apply multiple heavy filters
+    let processed = img
+
+    // 10 passes of complex filters
+    for (let pass = 0; pass < 10; pass++) {
+      processed = applyBlurFilter(processed)
+      processed = applySharpenFilter(processed)
+      processed = applyColorCorrection(processed)
+    }
+
+    return processed
+  }, imageData)
+)
+
+// 2.0x speedup: 19.0s → 9.7s
+const processedImages = await thread.all(...imageProcessors)
+```
+
+### Real-Time Data Analysis
+
+```javascript
+// Stream results as large datasets complete analysis
+const datasetProcessors = largeDataseets.map(dataset =>
+  threader(data => {
+    // Heavy statistical analysis
+    const mean = data.reduce((a, b) => a + b, 0) / data.length
+    const variance =
+      data.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / data.length
+
+    // Complex correlation analysis
+    const correlations = computeCorrelationMatrix(data)
+
+    return {
+      mean,
+      variance,
+      correlations,
+      outliers: detectOutliers(data),
+      trends: detectTrends(data)
+    }
+  }, dataset)
+)
+
+// 1.9x speedup with progressive results
+for await (const result of thread.stream(...datasetProcessors)) {
+  updateDashboard(result.result)
+  console.log(`Analysis ${result.index + 1} complete`)
+}
+```
 
 ## Installation & Setup
 
@@ -310,123 +397,63 @@ try {
 npm install threader
 ```
 
+### Automatic Setup
+
+- Rust backend builds automatically during installation
+- Graceful fallback to JavaScript workers if Rust unavailable
+- Zero configuration required - works out of the box
+
 ### Build from Source
 
 ```bash
-git clone https://github.com/username/threader
+git clone https://github.com/neuralline/threader
 cd threader
 npm install
 npm run build
 ```
 
-### Rust Backend (Optional)
+## Platform Support
+
+- **Node.js 16+** (primary target)
+- **Cross-platform**: macOS, Linux, Windows
+- **Multi-architecture**: x64, ARM64
+- **Rust acceleration** on supported platforms with automatic fallback
+
+## Benchmarks
+
+Run the included benchmarks to see performance on your system:
 
 ```bash
-# Built automatically during npm install
-# Manual build:
-npm run build:rust
-```
+# Heavy workload benchmark (shows 2-4x speedups)
+npm run bench:heavy
 
-## Examples
+# Overhead analysis (shows when to use vs avoid)
+npm run bench:overhead
 
-### Basic Usage
-
-```javascript
-import {threader, thread} from 'threader'
-
-// Simple parallel computation
-const tasks = [1, 2, 3, 4, 5].map(n => threader(x => x * x, n))
-
-const squares = await thread.all(...tasks)
-console.log(squares) // [1, 4, 9, 16, 25]
-```
-
-### Streaming Results
-
-```javascript
-// Process large dataset with progress updates
-const processors = hugeDataset.map(item => threader(processItem, item))
-
-let completed = 0
-for await (const result of thread.stream(...processors)) {
-  completed++
-  updateProgress(completed / processors.length)
-  handleResult(result)
-}
-```
-
-### Advanced Pipeline
-
-```javascript
-// Multi-stage processing pipeline
-const stage1 = data.map(item => threader(transform, item))
-const results1 = await thread.all(...stage1)
-
-const stage2 = results1.map(item => threader(analyze, item))
-const results2 = await thread.all(...stage2)
-
-const stage3 = results2.map(item => threader(optimize, item))
-const finalResults = await thread.all(...stage3)
+# Throughput analysis (shows ~100 ops/sec capability)
+npm run bench:throughput
 ```
 
 ## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-### Development Setup
-
-```bash
-git clone https://github.com/username/threader
-cd threader
-npm install
-npm run build:dev
-npm test
-```
-
-### Running Benchmarks
-
-```bash
-npm run bench
-```
-
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
-## Roadmap
-
-### Current (v0.1.0)
-
-- ✅ Core parallelism engine
-- ✅ Rust acceleration for simple functions
-- ✅ Multiple execution strategies
-- ✅ Function validation system
-- ✅ Error handling and recovery
-
-### Upcoming (v0.2.0)
-
-- 🔄 Browser support with Web Workers
-- 🔄 Enhanced debugging tools
-- 🔄 Memory usage optimization
-- 🔄 More Rust function patterns
-- 🔄 TypeScript improvements
-
-### Future (v1.0.0)
-
-- 🔮 GPU acceleration support
-- 🔮 Distributed computing capabilities
-- 🔮 Visual debugging interface
-- 🔮 Framework integrations
-- 🔮 Enterprise features
-
 ## Support
 
-- **Documentation**: [docs.threader.dev](https://docs.threader.dev)
-- **Issues**: [GitHub Issues](https://github.com/username/threader/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/username/threader/discussions)
-- **Discord**: [Threader Community](https://discord.gg/threader)
+- **Issues**: [GitHub Issues](https://github.com/neuralline/threader/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/neuralline/threader/discussions)
 
 ---
 
-**Threader** - Bringing enterprise-grade parallelism to JavaScript
-_Build faster, scale better, compute smarter._
+```sh
+Q0.0U0.0A0.0N0.0T0.0U0.0M0 - I0.0N0.0C0.0E0.0P0.0T0.0I0.0O0.0N0.0S0
+N0.0E0.0U0.0R0.00A.0L0 - L0.0I0.0N0.0E0
+THREADING MULTI CORE CONCURRENCY
+```
+
+**Threader** - Neural Line true multi-core JavaScript parallelism for heavy computational workloads
+_2-4x speedup where it matters most._

@@ -1,26 +1,494 @@
-// src/threader.ts - Pure functional approach (no classes, no complexity)
+// src/threader.ts - Enhanced with 2-Phase Optimization Pipeline (Pure Functional)
 import {performance} from 'perf_hooks'
-import {thread} from './thread'
+import msgpack from 'msgpack-lite'
 
 // ============================================================================
-// PURE FUNCTIONAL TYPES
+// ENHANCED TYPES WITH OPTIMIZATION DATA
 // ============================================================================
 
 export type ThreadFunction<T, R> = (data: T) => R | Promise<R>
 
 export interface ThreadOptions {
   timeout?: number
+  preferBinary?: boolean
+  disableOptimization?: boolean
+  batchHint?: 'single' | 'small' | 'medium' | 'large'
 }
 
-export interface Threader<T, R> {
+export interface OptimizedThreader<T, R> {
   readonly fn: ThreadFunction<T, R>
   readonly data: T
   readonly options: ThreadOptions
   readonly id: string
+
+  // OPTIMIZATION DATA (prepared in threader() phase)
+  readonly optimizationData: {
+    serializedData: {
+      buffer: ArrayBuffer | string
+      format: 'binary' | 'json'
+      transferables?: Transferable[]
+    }
+    functionAnalysis: {
+      complexity: 'low' | 'medium' | 'high'
+      isAsync: boolean
+      estimatedMemory: number
+      moduleDetections: string[]
+      isHotFunction: boolean
+      fnHash: string
+    }
+    batchStrategy: {
+      optimalBatchSize: number
+      shouldBatch: boolean
+      priority: number
+    }
+    rustHints: {
+      shouldUseRust: boolean
+      operationType: string
+      expectedCores: number
+    }
+  }
+}
+
+export type Threader<T, R> = OptimizedThreader<T, R>
+
+// ============================================================================
+// BINARY PROTOCOL (PURE FUNCTIONS)
+// ============================================================================
+
+// Global state for performance tracking (immutable updates)
+let binaryProtocolStats = new Map<
+  string,
+  {time: number; size: number; count: number}
+>()
+
+const estimateDataSize = (data: any): number => {
+  try {
+    return new Blob([JSON.stringify(data)]).size
+  } catch {
+    return 1000 // Default estimate
+  }
+}
+
+const extractTransferables = (data: any): Transferable[] => {
+  const transferables: Transferable[] = []
+
+  const findTransferables = (obj: any, visited = new Set()) => {
+    if (visited.has(obj) || obj === null || typeof obj !== 'object') return
+    visited.add(obj)
+
+    if (obj instanceof ArrayBuffer || obj instanceof MessagePort) {
+      transferables.push(obj)
+      return
+    }
+
+    if (Array.isArray(obj)) {
+      obj.forEach(item => findTransferables(item, visited))
+    } else {
+      Object.values(obj).forEach(value => findTransferables(value, visited))
+    }
+  }
+
+  try {
+    findTransferables(data)
+  } catch {
+    // Ignore errors in transferable detection
+  }
+
+  return transferables
+}
+
+const isComplexObject = (data: any): boolean => {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (Array.isArray(data) || Object.keys(data).length > 5)
+  )
+}
+
+const recordBinaryPerformance = (
+  format: 'binary' | 'json',
+  time: number,
+  size: number
+) => {
+  const key = `${format}_${size > 1024 ? 'large' : 'small'}`
+  const existing = binaryProtocolStats.get(key) || {time: 0, size: 0, count: 0}
+
+  binaryProtocolStats = new Map(
+    binaryProtocolStats.set(key, {
+      time: (existing.time * existing.count + time) / (existing.count + 1),
+      size: (existing.size * existing.count + size) / (existing.count + 1),
+      count: existing.count + 1
+    })
+  )
+}
+
+const serializeData = (
+  data: any,
+  preferBinary: boolean = false
+): {
+  buffer: ArrayBuffer | string
+  format: 'binary' | 'json'
+  transferables?: Transferable[]
+} => {
+  const startTime = performance.now()
+  const dataSize = estimateDataSize(data)
+  const transferables = extractTransferables(data)
+
+  // Intelligent format selection
+  const shouldUseBinary =
+    preferBinary ||
+    dataSize > 1024 ||
+    transferables.length > 0 ||
+    isComplexObject(data)
+
+  let result: {
+    buffer: ArrayBuffer | string
+    format: 'binary' | 'json'
+    transferables?: Transferable[]
+  }
+
+  if (shouldUseBinary) {
+    try {
+      const encoded = msgpack.encode(data)
+      result = {
+        buffer: encoded.buffer.slice(
+          encoded.byteOffset,
+          encoded.byteOffset + encoded.byteLength
+        ),
+        format: 'binary',
+        transferables: transferables.length > 0 ? transferables : undefined
+      }
+    } catch (error) {
+      // Fallback to JSON if binary fails
+      result = {
+        buffer: JSON.stringify(data),
+        format: 'json'
+      }
+    }
+  } else {
+    result = {
+      buffer: JSON.stringify(data),
+      format: 'json'
+    }
+  }
+
+  // Record performance for learning
+  const endTime = performance.now()
+  recordBinaryPerformance(result.format, endTime - startTime, dataSize)
+
+  return result
+}
+
+const deserializeData = (
+  buffer: ArrayBuffer | string,
+  format: 'binary' | 'json'
+): any => {
+  if (format === 'binary') {
+    return msgpack.decode(new Uint8Array(buffer as ArrayBuffer))
+  }
+  return JSON.parse(buffer as string)
 }
 
 // ============================================================================
-// PURE FUNCTIONAL STATE (IMMUTABLE)
+// FUNCTION ANALYSIS (PURE FUNCTIONS)
+// ============================================================================
+
+// Global state for function analysis cache
+let functionAnalysisCache = new Map<string, any>()
+let hotFunctionTracker = new Map<string, number>()
+
+const hashFunction = (fnString: string): string => {
+  let hash = 0
+  for (let i = 0; i < fnString.length; i++) {
+    const char = fnString.charCodeAt(i)
+    hash = (hash << 5) - hash + char
+    hash = hash & hash // Convert to 32-bit integer
+  }
+  return hash.toString()
+}
+
+const detectModuleUsage = (fnString: string): string[] => {
+  const modules: string[] = []
+  const patterns = [
+    /require\(['"`]([^'"`]+)['"`]\)/g,
+    /import.*from\s*['"`]([^'"`]+)['"`]/g,
+    /import\(['"`]([^'"`]+)['"`]\)/g
+  ]
+
+  patterns.forEach(pattern => {
+    let match
+    while ((match = pattern.exec(fnString)) !== null) {
+      modules.push(match[1])
+    }
+  })
+
+  return modules
+}
+
+const estimateComplexity = (fnString: string): 'low' | 'medium' | 'high' => {
+  const length = fnString.length
+  const hasLoops = /for\s*\(|while\s*\(|\.map\(|\.filter\(|\.reduce\(/i.test(
+    fnString
+  )
+  const hasAsync = /async|await|Promise|\.then\(/i.test(fnString)
+  const hasHeavyOps = /require|import|eval|Function/i.test(fnString)
+
+  if (length > 500 || hasHeavyOps) return 'high'
+  if (length > 100 || hasLoops || hasAsync) return 'medium'
+  return 'low'
+}
+
+const estimateMemoryUsage = (fnString: string, dataSize: number): number => {
+  const baseMemory = dataSize
+  const hasArrayOps = /\.map\(|\.filter\(|\.concat\(/i.test(fnString)
+  const hasStringOps = /\.split\(|\.join\(|\.replace\(/i.test(fnString)
+
+  let multiplier = 1
+  if (hasArrayOps) multiplier += 0.5
+  if (hasStringOps) multiplier += 0.3
+
+  return Math.floor(baseMemory * multiplier)
+}
+
+const trackHotFunction = (fnHash: string): number => {
+  const currentCount = hotFunctionTracker.get(fnHash) || 0
+  const newCount = currentCount + 1
+  hotFunctionTracker = new Map(hotFunctionTracker.set(fnHash, newCount))
+  return newCount
+}
+
+const analyzeFunction = <T, R>(fn: ThreadFunction<T, R>, dataSize: number) => {
+  const fnString = fn.toString()
+  const fnHash = hashFunction(fnString)
+
+  // Check cache first
+  if (functionAnalysisCache.has(fnHash)) {
+    const cached = functionAnalysisCache.get(fnHash)!
+    const usage = trackHotFunction(fnHash)
+    return {...cached, isHotFunction: usage > 10, fnHash}
+  }
+
+  // Analyze function
+  const analysis = {
+    complexity: estimateComplexity(fnString),
+    isAsync: /async|await|Promise|\.then\(/i.test(fnString),
+    estimatedMemory: estimateMemoryUsage(fnString, dataSize),
+    moduleDetections: detectModuleUsage(fnString),
+    isHotFunction: false,
+    fnHash
+  }
+
+  // Cache the analysis
+  functionAnalysisCache = new Map(functionAnalysisCache.set(fnHash, analysis))
+
+  const usage = trackHotFunction(fnHash)
+  return {...analysis, isHotFunction: usage > 10}
+}
+
+// ============================================================================
+// ADAPTIVE BATCHING (PURE FUNCTIONS)
+// ============================================================================
+
+// Global state for batching performance
+let batchingHistory = new Map<
+  string,
+  Array<{
+    batchSize: number
+    taskCount: number
+    totalTime: number
+    throughput: number
+  }>
+>()
+
+let optimalBatchSizes = new Map<string, number>()
+
+const getBatchingKey = (complexity: string, taskCount: number): string => {
+  const scale =
+    taskCount > 1000 ? 'large' : taskCount > 100 ? 'medium' : 'small'
+  return `${complexity}_${scale}`
+}
+
+const getDefaultBatchSize = (
+  complexity: 'low' | 'medium' | 'high',
+  taskCount: number
+): number => {
+  const defaults = {
+    low: Math.min(taskCount, 100),
+    medium: Math.min(taskCount, 50),
+    high: Math.min(taskCount, 10)
+  }
+  return defaults[complexity]
+}
+
+const calculateOptimalBatchSize = (
+  complexity: 'low' | 'medium' | 'high',
+  taskCount: number
+): number => {
+  const key = getBatchingKey(complexity, taskCount)
+
+  // Use learned optimal size if available
+  if (optimalBatchSizes.has(key)) {
+    return optimalBatchSizes.get(key)!
+  }
+
+  return getDefaultBatchSize(complexity, taskCount)
+}
+
+const calculateBatchStrategy = (
+  functionAnalysis: any,
+  taskCount: number = 1
+) => {
+  const optimalBatchSize = calculateOptimalBatchSize(
+    functionAnalysis.complexity,
+    taskCount
+  )
+
+  const shouldBatch = taskCount > 20 && functionAnalysis.complexity !== 'high'
+
+  const priority = functionAnalysis.isHotFunction
+    ? 1
+    : functionAnalysis.complexity === 'low'
+    ? 2
+    : 3
+
+  return {
+    optimalBatchSize,
+    shouldBatch,
+    priority
+  }
+}
+
+const recordBatchingPerformance = (
+  complexity: 'low' | 'medium' | 'high',
+  taskCount: number,
+  batchSize: number,
+  totalTime: number,
+  resultCount: number
+) => {
+  const key = getBatchingKey(complexity, taskCount)
+
+  const performance = {
+    batchSize,
+    taskCount,
+    totalTime,
+    throughput: (resultCount / totalTime) * 1000
+  }
+
+  const history = batchingHistory.get(key) || []
+  const newHistory = [...history, performance].slice(-20) // Keep last 20 entries
+
+  batchingHistory = new Map(batchingHistory.set(key, newHistory))
+
+  // Update optimal batch size based on best throughput
+  if (newHistory.length >= 5) {
+    const bestPerformance = newHistory.reduce((best, current) =>
+      current.throughput > best.throughput ? current : best
+    )
+    optimalBatchSizes = new Map(
+      optimalBatchSizes.set(key, bestPerformance.batchSize)
+    )
+  }
+}
+
+// ============================================================================
+// RUST HINTS (PURE FUNCTIONS)
+// ============================================================================
+
+const determineOperationType = (fnString: string): string => {
+  if (/math\.|Math\./i.test(fnString)) return 'mathematical'
+  if (/\.map\(|\.filter\(|\.reduce\(/i.test(fnString)) return 'array_operations'
+  if (/require\(['"`]sharp['"`]\)|require\(['"`]jimp['"`]\)/i.test(fnString))
+    return 'image_processing'
+  if (/\.toUpperCase\(|\.toLowerCase\(|\.split\(/i.test(fnString))
+    return 'string_operations'
+  return 'general'
+}
+
+const shouldUseRustBackend = (
+  functionAnalysis: any,
+  operationType: string
+): boolean => {
+  // Don't use Rust for complex operations that need full JS environment
+  if (functionAnalysis.moduleDetections.length > 0) return false
+  if (functionAnalysis.complexity === 'high') return false
+  if (functionAnalysis.isAsync) return false
+
+  // Use Rust for simple, synchronous operations
+  const rustOptimalTypes = [
+    'mathematical',
+    'string_operations',
+    'array_operations'
+  ]
+  return rustOptimalTypes.includes(operationType)
+}
+
+const estimateExpectedCores = (
+  complexity: 'low' | 'medium' | 'high'
+): number => {
+  const availableCores = require('os').cpus().length
+
+  switch (complexity) {
+    case 'low':
+      return Math.min(availableCores, 8)
+    case 'medium':
+      return Math.min(availableCores, 4)
+    case 'high':
+      return Math.min(availableCores, 2)
+    default:
+      return 1
+  }
+}
+
+const generateRustHints = (functionAnalysis: any) => {
+  const operationType = determineOperationType(functionAnalysis.fnHash)
+
+  return {
+    shouldUseRust: shouldUseRustBackend(functionAnalysis, operationType),
+    operationType,
+    expectedCores: estimateExpectedCores(functionAnalysis.complexity)
+  }
+}
+
+// ============================================================================
+// JIT OPTIMIZATION HINTS (PURE FUNCTIONS)
+// ============================================================================
+
+const applyJITHints = <T, R>(
+  fn: ThreadFunction<T, R>,
+  isHotFunction: boolean
+): ThreadFunction<T, R> => {
+  if (!isHotFunction) return fn
+
+  // For hot functions, create an optimized wrapper
+  const optimizedFn = (data: T): R | Promise<R> => {
+    'use strict'
+
+    // V8 optimization hints (these are implementation-specific)
+    try {
+      // Warm up the function for better JIT compilation
+      if ((optimizedFn as any).__warmupDone !== true) {
+        // Dummy warmup calls
+        for (let i = 0; i < 3; i++) {
+          try {
+            fn({} as T)
+          } catch {
+            /* ignore warmup errors */
+          }
+        }
+        ;(optimizedFn as any).__warmupDone = true
+      }
+    } catch {
+      // Ignore warmup errors
+    }
+
+    return fn(data)
+  }
+
+  return optimizedFn
+}
+
+// ============================================================================
+// BACKEND STATE MANAGEMENT
 // ============================================================================
 
 interface BackendState {
@@ -34,10 +502,6 @@ let backendState: BackendState = {
   isAvailable: false,
   coreCount: 1
 }
-
-// ============================================================================
-// PURE FUNCTIONS FOR BACKEND DETECTION
-// ============================================================================
 
 const loadRustBackend = (): any | null => {
   const paths = [
@@ -87,120 +551,87 @@ const initializeBackend = (): BackendState => {
   }
 }
 
-// Initialize once
+// Initialize backend state once
 backendState = initializeBackend()
 
 // ============================================================================
-// PURE FUNCTIONAL THREADER CREATION
+// ENHANCED THREADER FUNCTION (2-PHASE OPTIMIZATION)
 // ============================================================================
 
 export const threader = <T, R>(
   fn: ThreadFunction<T, R>,
   data: T,
   options: ThreadOptions = {}
-): Threader<T, R> => ({
-  fn,
-  data,
-  options,
-  id: Math.random().toString(36).substring(2, 15)
-})
+): Threader<T, R> => {
+  // PHASE 1: PREPARATION & OPTIMIZATION
 
-// ============================================================================
-// PURE FUNCTIONAL EXECUTION
-// ============================================================================
+  // 1. Binary Protocol Optimization
+  const serializedData = serializeData(data, options.preferBinary)
 
-const executeWithRust = async <R>(
-  threaders: Threader<any, R>[]
-): Promise<R[]> => {
-  if (!backendState.executor) {
-    throw new Error('No Rust backend available')
+  // 2. Function Analysis
+  const dataSize = estimateDataSize(data)
+  const functionAnalysis = analyzeFunction(fn, dataSize)
+
+  // 3. JIT Optimization Hints
+  const optimizedFn = options.disableOptimization
+    ? fn
+    : applyJITHints(fn, functionAnalysis.isHotFunction)
+
+  // 4. Adaptive Batching Strategy
+  const batchStrategy = calculateBatchStrategy(functionAnalysis)
+
+  // 5. Rust Backend Hints
+  const rustHints = generateRustHints(functionAnalysis)
+
+  // 6. Warm up Rust backend if beneficial
+  if (rustHints.shouldUseRust && backendState.isAvailable) {
+    // Send optimization hints to Rust backend
+    try {
+      backendState.executor?.optimizeForWorkload?.(
+        rustHints.operationType,
+        rustHints.expectedCores
+      )
+    } catch {
+      // Ignore if backend doesn't support optimization hints
+    }
   }
 
-  const taskData = threaders.map(t => [t.fn.toString(), JSON.stringify(t.data)])
-
-  const taskIds = await backendState.executor.submitBatch(taskData)
-  const rustResults = await backendState.executor.getBatchResults(
-    taskIds.length,
-    30000
-  )
-
-  return rustResults.map((resultJson: string, index: number) => {
-    try {
-      const parsed = JSON.parse(resultJson)
-
-      if (parsed.error) {
-        // Rust failed, fallback to JavaScript for this task
-        return threaders[index].fn(threaders[index].data)
-      }
-
-      // Parse Rust result
-      if (parsed.result !== undefined) {
-        if (
-          typeof parsed.result === 'string' &&
-          parsed.result.startsWith('"')
-        ) {
-          return parsed.result.slice(1, -1) // Remove quotes
-        }
-        try {
-          return JSON.parse(parsed.result)
-        } catch {
-          return parsed.result
-        }
-      }
-
-      return parsed
-    } catch (parseError) {
-      // Parse failed, fallback to JavaScript
-      return threaders[index].fn(threaders[index].data)
+  // Return optimized threader with all preparation complete
+  return {
+    fn: optimizedFn,
+    data,
+    options,
+    id: Math.random().toString(36).substring(2, 15),
+    optimizationData: {
+      serializedData,
+      functionAnalysis,
+      batchStrategy,
+      rustHints
     }
-  })
-}
-
-const executeWithJavaScript = async <R>(
-  threaders: Threader<any, R>[]
-): Promise<R[]> => Promise.all(threaders.map(t => t.fn(t.data)))
-
-const executeOptimally = async <R>(
-  threaders: Threader<any, R>[]
-): Promise<R[]> => {
-  if (threaders.length === 0) return []
-
-  // Try Rust first, fallback to JavaScript if needed
-  if (backendState.isAvailable) {
-    try {
-      return await executeWithRust(threaders)
-    } catch (error) {
-      console.warn('Rust execution failed, using JavaScript:', error.message)
-      return await executeWithJavaScript(threaders)
-    }
-  } else {
-    return await executeWithJavaScript(threaders)
   }
 }
 
 // ============================================================================
-// PURE FUNCTIONAL THREAD API
-// ============================================================================
-
-export interface ThreadResult<R> {
-  index: number
-  result: R
-  error?: Error
-  duration: number
-}
-
-export type ThreadResults<T extends readonly Threader<any, any>[]> = {
-  [K in keyof T]: T[K] extends Threader<any, infer R> ? R : never
-}
-
-// ============================================================================
-// PURE FUNCTIONAL UTILITIES
+// UTILITY FUNCTIONS
 // ============================================================================
 
 export const cache = {
-  size: () => 0, // No cache needed in pure functional approach
-  clear: () => {},
-  stats: () => ({size: 0})
+  size: () => functionAnalysisCache.size + binaryProtocolStats.size,
+  clear: () => {
+    functionAnalysisCache = new Map()
+    binaryProtocolStats = new Map()
+    hotFunctionTracker = new Map()
+    batchingHistory = new Map()
+    optimalBatchSizes = new Map()
+  },
+  stats: () => ({
+    functionAnalysisCache: functionAnalysisCache.size,
+    binaryProtocolStats: binaryProtocolStats.size,
+    hotFunctions: Array.from(hotFunctionTracker.entries()).filter(
+      ([, count]) => count > 10
+    ).length,
+    optimalBatchSizes: optimalBatchSizes.size
+  })
 }
 
 export const benchmark = <T, R>(
@@ -222,68 +653,35 @@ export const benchmark = <T, R>(
       timeMs: directTime,
       opsPerSec: directOps
     },
-    backend: backendState.isAvailable ? 'rust' : 'javascript'
+    backend: backendState.isAvailable ? 'rust' : 'javascript',
+    optimization: cache.stats()
   }
 }
 
-// ============================================================================
-// PURE FUNCTIONAL HELPERS
-// ============================================================================
-
-/**
- * Map over array in parallel
- */
-export const pmap = async <T, R>(
-  items: T[],
-  fn: (item: T) => R | Promise<R>
-): Promise<R[]> => {
-  const processors = items.map(item => threader(fn, item))
-  return thread.all(...processors)
-}
-
-/**
- * Filter array in parallel
- */
-export const pfilter = async <T>(
-  items: T[],
-  predicate: (item: T) => boolean | Promise<boolean>
-): Promise<T[]> => {
-  const processors = items.map(item => threader(predicate, item))
-  const results = await thread.all(...processors)
-  return items.filter((_, i) => results[i])
-}
-
-/**
- * Reduce in parallel (for associative operations)
- */
-export const preduce = async <T, R>(
-  items: T[],
-  fn: (acc: R, item: T) => R,
-  initial: R
-): Promise<R> => {
-  if (items.length === 0) return initial
-  if (items.length === 1) return fn(initial, items[0])
-
-  // Split into chunks for parallel processing
-  const chunkSize = Math.max(
-    1,
-    Math.floor(items.length / backendState.coreCount)
-  )
-  const chunks: T[][] = []
-
-  for (let i = 0; i < items.length; i += chunkSize) {
-    chunks.push(items.slice(i, i + chunkSize))
-  }
-
-  // Process chunks in parallel
-  const chunkReducer = (chunk: T[]) => chunk.reduce(fn, initial)
-  const processors = chunks.map(chunk => threader(chunkReducer, chunk))
-  const chunkResults = await thread.all(...processors)
-
-  // Combine chunk results
-  return chunkResults.reduce(fn, initial)
-}
+// Export deserializeData for use in workers
+export {deserializeData}
 
 // ============================================================================
 // ERROR CLASSES (FUNCTIONAL)
 // ============================================================================
+
+export class ThreadValidationError extends Error {
+  constructor(message: string, public functionString?: string) {
+    super(message)
+    this.name = 'ThreadValidationError'
+  }
+}
+
+export class ThreadTimeoutError extends Error {
+  constructor(timeout: number) {
+    super(`Thread execution timed out after ${timeout}ms`)
+    this.name = 'ThreadTimeoutError'
+  }
+}
+
+export class ThreadCancelledError extends Error {
+  constructor() {
+    super('Thread execution was cancelled')
+    this.name = 'ThreadCancelledError'
+  }
+}

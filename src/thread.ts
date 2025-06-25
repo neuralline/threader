@@ -1,9 +1,9 @@
-// src/thread.ts - Simplified functional thread executor
+// src/thread.ts - Enhanced execution engine with FIXED streaming
 import {performance} from 'perf_hooks'
-import type {Threader} from './threader'
+import type {Threader, deserializeData} from './threader'
 
 // ============================================================================
-// TYPES (Same API)
+// TYPES
 // ============================================================================
 
 export interface ThreadResult<R> {
@@ -25,115 +25,342 @@ export interface ThreadConfig {
 }
 
 // ============================================================================
-// FUNCTIONAL EXECUTION (NO WORKER MANAGEMENT OVERHEAD)
+// WORKER THREAD EXECUTION (FIXED)
 // ============================================================================
 
 /**
- * Execute single threader directly - no overhead
+ * Execute with actual worker threads for true parallelism
  */
-const executeSingle = async <R>(threader: Threader<any, R>): Promise<R> => {
+const executeWithWorkerThread = async <R>(
+  threader: Threader<any, R>
+): Promise<R> => {
+  return new Promise((resolve, reject) => {
+    const {Worker} = require('worker_threads')
+
+    // Create worker script that executes the function
+    const workerScript = `
+      const { parentPort } = require('worker_threads')
+      
+      parentPort.on('message', async ({ fnString, data, taskId }) => {
+        try {
+          // Create function from string
+          const func = new Function('return ' + fnString)()
+          
+          // Execute function
+          const result = await func(data)
+          
+          parentPort.postMessage({ 
+            success: true, 
+            result, 
+            taskId,
+            workerId: process.pid 
+          })
+        } catch (error) {
+          parentPort.postMessage({ 
+            success: false, 
+            error: error.message, 
+            taskId,
+            workerId: process.pid 
+          })
+        }
+      })
+    `
+
+    const worker = new Worker(workerScript, {eval: true})
+    const timeout = threader.options.timeout || 30000
+    let isCompleted = false
+
+    // Handle worker messages
+    worker.on('message', ({success, result, error, taskId, workerId}) => {
+      if (isCompleted) return
+      isCompleted = true
+
+      worker.terminate()
+
+      if (success) {
+        resolve(result)
+      } else {
+        reject(new Error(error))
+      }
+    })
+
+    // Handle worker errors
+    worker.on('error', error => {
+      if (isCompleted) return
+      isCompleted = true
+
+      worker.terminate()
+      reject(error)
+    })
+
+    // Send task to worker
+    worker.postMessage({
+      fnString: threader.fn.toString(),
+      data: threader.data,
+      taskId: threader.id
+    })
+
+    // Timeout handling
+    setTimeout(() => {
+      if (isCompleted) return
+      isCompleted = true
+
+      worker.terminate()
+      reject(new Error(`Worker timeout after ${timeout}ms`))
+    }, timeout)
+  })
+}
+
+// ============================================================================
+// OPTIMIZED EXECUTION FUNCTIONS
+// ============================================================================
+
+/**
+ * Execute single threader using pre-optimized data OR worker threads
+ */
+const executeOptimized = async <R>(threader: Threader<any, R>): Promise<R> => {
+  const {optimizationData} = threader
+
+  // Try Rust backend first if recommended
+  if (optimizationData.rustHints.shouldUseRust) {
+    try {
+      const results = await executeWithRust([threader])
+      return results[0]
+    } catch (error) {
+      console.warn('Rust execution failed, falling back to worker threads')
+    }
+  }
+
+  // Use worker threads for true parallelism
+  return executeWithWorkerThread(threader)
+}
+
+/**
+ * Execute with Rust backend using optimization hints
+ */
+const executeWithRust = async <R>(
+  threaders: Threader<any, R>[]
+): Promise<R[]> => {
   try {
-    const result = await threader.fn(threader.data)
-    return result as R
+    const backend = require('../threader.node')
+
+    if (!backend?.MultiCoreExecutor) {
+      throw new Error('Rust backend not available')
+    }
+
+    const executor = new backend.MultiCoreExecutor()
+
+    // Use pre-serialized data from optimization phase
+    const taskData = threaders.map(t => [
+      t.fn.toString(),
+      typeof t.optimizationData.serializedData.buffer === 'string'
+        ? t.optimizationData.serializedData.buffer
+        : JSON.stringify(t.data)
+    ])
+
+    const taskIds = await executor.submitBatch(taskData)
+    const rustResults = await executor.getBatchResults(taskIds.length, 30000)
+
+    return rustResults.map((resultJson: string, index: number) => {
+      try {
+        const parsed = JSON.parse(resultJson)
+
+        if (parsed.error) {
+          throw new Error(parsed.error)
+        }
+
+        if (parsed.result !== undefined) {
+          if (
+            typeof parsed.result === 'string' &&
+            parsed.result.startsWith('"')
+          ) {
+            return parsed.result.slice(1, -1)
+          }
+          try {
+            return JSON.parse(parsed.result)
+          } catch {
+            return parsed.result
+          }
+        }
+
+        return parsed
+      } catch (parseError) {
+        throw parseError
+      }
+    })
   } catch (error) {
     throw error
   }
 }
 
 /**
- * Execute multiple threaders in parallel - pure Promise.all
+ * Smart batched execution using pre-calculated batch strategy
  */
-const executeMultiple = async <R>(
-  threaders: readonly Threader<any, R>[]
+const executeBatched = async <R>(
+  threaders: Threader<any, R>[],
+  batchSize: number
 ): Promise<R[]> => {
-  // Simple parallel execution using Promise.all
-  const promises = threaders.map(t => executeSingle(t))
+  const results: R[] = []
+
+  for (let i = 0; i < threaders.length; i += batchSize) {
+    const batch = threaders.slice(i, i + batchSize)
+
+    // Execute batch in parallel using Promise.all
+    const batchPromises = batch.map(t => executeOptimized(t))
+    const batchResults = await Promise.all(batchPromises)
+
+    results.push(...batchResults)
+  }
+
+  return results
+}
+
+/**
+ * Route execution based on optimization data
+ */
+const executeOptimally = async <R>(
+  threaders: Threader<any, R>[]
+): Promise<R[]> => {
+  if (threaders.length === 0) return []
+
+  // Check if batching is recommended for large sets
+  const shouldBatch =
+    threaders.length > 20 &&
+    threaders.some(t => t.optimizationData.batchStrategy.shouldBatch)
+
+  if (shouldBatch) {
+    const optimalBatchSize =
+      threaders[0].optimizationData.batchStrategy.optimalBatchSize
+    return executeBatched(threaders, optimalBatchSize)
+  }
+
+  // Execute all in parallel using Promise.all
+  const promises = threaders.map(t => executeOptimized(t))
   return Promise.all(promises)
 }
 
 // ============================================================================
-// THREAD EXECUTOR API (FUNCTIONAL)
+// ENHANCED THREAD EXECUTOR API (FIXED)
 // ============================================================================
 
 /**
- * Simplified functional thread executor
+ * Enhanced thread executor with FIXED streaming
  */
 export const thread = {
   /**
-   * Execute all threaders and wait for completion (like Promise.all)
+   * Execute all threaders using pre-optimization data
    */
   async all<T extends readonly Threader<any, any>[]>(
     ...processors: T
   ): Promise<ThreadResults<T>> {
     if (processors.length === 0) return [] as any
 
-    const results = await executeMultiple(processors)
+    const startTime = performance.now()
+
+    // Execute all processors in parallel
+    const results = await executeOptimally(processors)
+
+    const duration = performance.now() - startTime
+
+    // Record performance for learning (if available)
+    try {
+      const {recordBatchingPerformance} = require('./threader')
+      if (processors.length > 1 && recordBatchingPerformance) {
+        const firstProcessor = processors[0]
+        recordBatchingPerformance(
+          firstProcessor.optimizationData.functionAnalysis.complexity,
+          processors.length,
+          firstProcessor.optimizationData.batchStrategy.optimalBatchSize,
+          duration,
+          results.length
+        )
+      }
+    } catch {
+      // Ignore if recording not available
+    }
+
     return results as ThreadResults<T>
   },
 
   /**
-   * Stream results as they complete - PURE INDIVIDUAL EXECUTION
+   * FIXED: Stream results as they actually complete
    */
   async *stream<T extends readonly Threader<any, any>[]>(
     ...processors: T
   ): AsyncIterable<ThreadResult<any>> {
     if (processors.length === 0) return
 
-    // BYPASS ALL BATCHING - Execute each processor completely independently
-    const individualPromises = processors.map(async (processor, index) => {
+    // Create independent promises for each processor
+    const taskPromises = processors.map(async (processor, index) => {
       const startTime = performance.now()
 
       try {
-        // DIRECT EXECUTION - No routing through executeOptimally or any batch system
-        const result = await processor.fn(processor.data)
+        const result = await executeOptimized(processor)
         return {
           index,
           result,
-          duration: performance.now() - startTime
+          duration: performance.now() - startTime,
+          error: undefined,
+          completed: true
         }
       } catch (error) {
         return {
           index,
           result: undefined,
+          duration: performance.now() - startTime,
           error: error as Error,
-          duration: performance.now() - startTime
+          completed: true
         }
       }
     })
 
-    // Race the individual promises as they complete
-    let remaining = individualPromises.map((promise, originalIndex) => ({
-      promise,
-      originalIndex
-    }))
+    // Track completed tasks
+    const completed = new Set<number>()
+    let totalCompleted = 0
 
-    while (remaining.length > 0) {
-      const completed = await Promise.race(
-        remaining.map(({promise, originalIndex}, arrayIndex) =>
-          promise.then(result => ({result, arrayIndex, originalIndex}))
+    // Stream results as they complete
+    while (totalCompleted < processors.length) {
+      // Get all pending promises (not yet completed)
+      const pendingPromises = taskPromises
+        .map((promise, originalIndex) =>
+          promise.then(result => ({result, originalIndex}))
         )
-      )
+        .filter((_, index) => !completed.has(index))
 
-      yield completed.result
+      if (pendingPromises.length === 0) break
 
-      // Remove the completed promise from remaining array
-      remaining.splice(completed.arrayIndex, 1)
+      // Wait for the next task to complete
+      const {result, originalIndex} = await Promise.race(pendingPromises)
+
+      // Only yield if we haven't seen this result before
+      if (!completed.has(originalIndex)) {
+        completed.add(originalIndex)
+        totalCompleted++
+
+        // Yield the result immediately
+        yield {
+          index: result.index,
+          result: result.result,
+          error: result.error,
+          duration: result.duration
+        }
+      }
     }
   },
 
   /**
-   * Fire and forget - execute without waiting for results
+   * Fire and forget using optimized execution
    */
   fire<T extends readonly Threader<any, any>[]>(...processors: T): void {
     processors.forEach(processor => {
-      executeSingle(processor).catch(error => {
+      executeOptimized(processor).catch(error => {
         console.error('Fire-and-forget execution failed:', error)
       })
     })
   },
 
   /**
-   * Return the first completed result (like Promise.race)
+   * Race using pre-optimized processors
    */
   async race<T extends readonly Threader<any, any>[]>(
     ...processors: T
@@ -145,7 +372,7 @@ export const thread = {
     const promises = processors.map(async (processor, index) => {
       const startTime = performance.now()
       try {
-        const result = await executeSingle(processor)
+        const result = await executeOptimized(processor)
         return {
           index,
           result,
@@ -165,7 +392,7 @@ export const thread = {
   },
 
   /**
-   * Return the first N completed results
+   * Return first N completed results
    */
   async any<T extends readonly Threader<any, any>[]>(
     count: number,
@@ -174,20 +401,19 @@ export const thread = {
     if (count <= 0) return []
     if (processors.length === 0) throw new Error('No processors provided')
 
-    // If requesting all or more, just use all()
     if (count >= processors.length) {
       const results = await this.all(...processors)
       return results.map((result, index) => ({
         index,
         result,
-        duration: 0 // Could track actual duration
+        duration: 0
       }))
     }
 
     const promises = processors.map(async (processor, index) => {
       const startTime = performance.now()
       try {
-        const result = await executeSingle(processor)
+        const result = await executeOptimized(processor)
         return {
           index,
           result,
@@ -204,7 +430,7 @@ export const thread = {
     })
 
     const results: ThreadResult<any>[] = []
-    const remaining = [...promises]
+    let remaining = [...promises]
 
     while (results.length < count && remaining.length > 0) {
       const completed = await Promise.race(
@@ -221,18 +447,47 @@ export const thread = {
   },
 
   /**
-   * Configure global settings (simplified)
+   * Configure global settings
    */
   configure(config: Partial<ThreadConfig>): void {
-    // In functional version, configuration is minimal
     console.log('Thread configuration updated:', config)
   },
 
   /**
-   * Shutdown - no cleanup needed in functional version
+   * Shutdown with cleanup
    */
   async shutdown(): Promise<void> {
-    // No worker pools to shutdown in functional version
-    console.log('Thread executor shutdown complete')
+    try {
+      const {cache} = await import('./threader')
+      cache.clear()
+    } catch {
+      // Ignore if cache not available
+    }
+
+    console.log('Thread executor shutdown complete with cache cleanup')
+  },
+
+  /**
+   * Get optimization performance statistics
+   */
+  getOptimizationStats(): any {
+    try {
+      const {cache} = require('./threader')
+      return {
+        cacheStats: cache.stats(),
+        description: 'Optimization statistics from cache'
+      }
+    } catch {
+      return {
+        error: 'Stats not available',
+        description: 'Cache not loaded'
+      }
+    }
   }
 }
+
+// ============================================================================
+// EXPORTS
+// ============================================================================
+
+export {executeOptimized, executeWithRust, executeBatched, executeOptimally}

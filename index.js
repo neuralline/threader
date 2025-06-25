@@ -310,8 +310,8 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { MultiCoreExecutor, isMulticoreAvailable, getMulticoreInfo } = nativeBinding
+const { OptimizedMultiCoreExecutor, isOptimizedMulticoreAvailable, getOptimizedMulticoreInfo } = nativeBinding
 
-module.exports.MultiCoreExecutor = MultiCoreExecutor
-module.exports.isMulticoreAvailable = isMulticoreAvailable
-module.exports.getMulticoreInfo = getMulticoreInfo
+module.exports.OptimizedMultiCoreExecutor = OptimizedMultiCoreExecutor
+module.exports.isOptimizedMulticoreAvailable = isOptimizedMulticoreAvailable
+module.exports.getOptimizedMulticoreInfo = getOptimizedMulticoreInfo
