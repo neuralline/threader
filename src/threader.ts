@@ -1,4 +1,4 @@
-// src/threader.ts - Enhanced with 2-Phase Optimization Pipeline (Pure Functional)
+// src/threader.ts - Fixed JIT optimization that doesn't break serialization
 import {performance} from 'perf_hooks'
 import msgpack from 'msgpack-lite'
 
@@ -450,39 +450,53 @@ const generateRustHints = (functionAnalysis: any) => {
 }
 
 // ============================================================================
-// JIT OPTIMIZATION HINTS (PURE FUNCTIONS)
+// FIXED JIT OPTIMIZATION HINTS (NO CLOSURE REFERENCES)
 // ============================================================================
 
+/**
+ * FIXED: Apply JIT hints without creating closure references
+ * This creates a self-contained function that doesn't reference external variables
+ */
 const applyJITHints = <T, R>(
   fn: ThreadFunction<T, R>,
   isHotFunction: boolean
 ): ThreadFunction<T, R> => {
   if (!isHotFunction) return fn
 
-  // For hot functions, create an optimized wrapper
-  const optimizedFn = (data: T): R | Promise<R> => {
-    'use strict'
+  // FIXED: Create a standalone optimized function without closure references
+  const originalFnString = fn.toString()
 
-    // V8 optimization hints (these are implementation-specific)
+  // Create a new function that embeds the original function code directly
+  const optimizedFn = new Function(
+    'data',
+    `
+    'use strict';
+    
+    // Embedded original function
+    const originalFn = ${originalFnString};
+    
+    // JIT optimization hints (V8 specific)
     try {
-      // Warm up the function for better JIT compilation
-      if ((optimizedFn as any).__warmupDone !== true) {
-        // Dummy warmup calls
+      // Warmup for better JIT compilation (only once)
+      if (!originalFn.__jitWarmedUp) {
+        // Dummy warmup calls to trigger JIT
         for (let i = 0; i < 3; i++) {
           try {
-            fn({} as T)
+            originalFn({});
           } catch {
-            /* ignore warmup errors */
+            // Ignore warmup errors
           }
         }
-        ;(optimizedFn as any).__warmupDone = true
+        originalFn.__jitWarmedUp = true;
       }
     } catch {
       // Ignore warmup errors
     }
-
-    return fn(data)
-  }
+    
+    // Execute the original function
+    return originalFn(data);
+  `
+  ) as ThreadFunction<T, R>
 
   return optimizedFn
 }
@@ -555,7 +569,7 @@ const initializeBackend = (): BackendState => {
 backendState = initializeBackend()
 
 // ============================================================================
-// ENHANCED THREADER FUNCTION (2-PHASE OPTIMIZATION)
+// ENHANCED THREADER FUNCTION (2-PHASE OPTIMIZATION) - FIXED
 // ============================================================================
 
 export const threader = <T, R>(
@@ -572,7 +586,7 @@ export const threader = <T, R>(
   const dataSize = estimateDataSize(data)
   const functionAnalysis = analyzeFunction(fn, dataSize)
 
-  // 3. JIT Optimization Hints
+  // 3. FIXED JIT Optimization Hints (no closure references)
   const optimizedFn = options.disableOptimization
     ? fn
     : applyJITHints(fn, functionAnalysis.isHotFunction)
@@ -659,7 +673,7 @@ export const benchmark = <T, R>(
 }
 
 // Export deserializeData for use in workers
-export {deserializeData}
+export {deserializeData, recordBatchingPerformance}
 
 // ============================================================================
 // ERROR CLASSES (FUNCTIONAL)

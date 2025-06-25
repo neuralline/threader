@@ -1,424 +1,624 @@
-// src/utils/worker-manager.ts
+// src/utils/worker-manager.ts - Updated functional drop-in replacement
 import {Worker} from 'worker_threads'
 import * as path from 'path'
-import {ThreadConfig, Threader, ThreadTimeoutError} from '../types'
-import {serializeTask, SerializedTask} from './serialization'
-import {getTransferables} from './validation'
+import * as os from 'os'
+import type {Threader, ThreadConfig, ThreadTimeoutError} from '../types'
 
-/**
- * Manages a pool of worker threads for parallel execution
- */
-export class WorkerManager {
-  private workers: WorkerWrapper[] = []
-  private availableWorkers: WorkerWrapper[] = []
-  private taskQueue: PendingTask[] = []
-  private config: ThreadConfig
-  private rustBackend: any = null
+// ============================================================================
+// PURE FUNCTIONAL WORKER MANAGER (Updated for 2-Phase Architecture)
+// ============================================================================
 
-  constructor(config: ThreadConfig) {
-    this.config = config
-    this.loadRustBackend()
-    this.initializeWorkers()
-  }
+export interface WorkerManagerState {
+  readonly workers: ReadonlyArray<WorkerInstance>
+  readonly availableWorkers: ReadonlyArray<WorkerInstance>
+  readonly taskQueue: ReadonlyArray<PendingTask>
+  readonly config: ThreadConfig
+  readonly rustBackend: any | null
+  readonly isShuttingDown: boolean
+}
 
-  /**
-   * Try to load the Rust backend
-   */
-  private loadRustBackend(): void {
+export interface WorkerInstance {
+  readonly id: string
+  readonly worker: Worker
+  readonly busy: boolean
+  readonly tasks: ReadonlyMap<string, PendingTask>
+  readonly createdAt: number
+  readonly executionCount: number
+}
+
+export interface PendingTask {
+  readonly taskId: string
+  readonly threader: Threader<any, any>
+  readonly resolve: (result: any) => void
+  readonly reject: (error: Error) => void
+  readonly timeout: number
+  readonly timeoutId: NodeJS.Timeout
+  readonly startTime: number
+}
+
+export interface WorkerManagerAPI {
+  readonly execute: <R>(threader: Threader<any, R>) => Promise<R>
+  readonly executeBatch: <R>(
+    threaders: ReadonlyArray<Threader<any, R>>
+  ) => Promise<R[]>
+  readonly updateConfig: (config: Partial<ThreadConfig>) => WorkerManagerAPI
+  readonly shutdown: () => Promise<void>
+  readonly getStats: () => WorkerStats
+}
+
+export interface WorkerStats {
+  readonly totalWorkers: number
+  readonly availableWorkers: number
+  readonly queuedTasks: number
+  readonly totalExecutions: number
+  readonly rustBackendAvailable: boolean
+}
+
+// ============================================================================
+// RUST BACKEND INTEGRATION (Pure Functions)
+// ============================================================================
+
+const loadRustBackend = (): any | null => {
+  const possiblePaths = [
+    // Platform-specific binaries
+    path.resolve(process.cwd(), 'threader.darwin-arm64.node'),
+    path.resolve(process.cwd(), 'threader.darwin-x64.node'),
+    path.resolve(process.cwd(), 'threader.linux-x64-gnu.node'),
+    path.resolve(process.cwd(), 'threader.win32-x64-msvc.node'),
+    // Generic paths
+    path.resolve(process.cwd(), 'threader.node'),
+    path.resolve(process.cwd(), 'index.js'),
+    // Development paths
+    path.resolve(__dirname, '../../threader.node'),
+    path.resolve(__dirname, '../../index.js')
+  ]
+
+  for (const binPath of possiblePaths) {
     try {
-      // Try multiple possible paths for the Rust binary
-      const possiblePaths = [
-        // Platform-specific binary in root
-        path.resolve(process.cwd(), 'threader.darwin-arm64.node'),
-        path.resolve(process.cwd(), 'threader.darwin-x64.node'),
-        path.resolve(process.cwd(), 'threader.linux-x64-gnu.node'),
-        path.resolve(process.cwd(), 'threader.win32-x64-msvc.node'),
-        // Generic binary name
-        path.resolve(process.cwd(), 'threader.node'),
-        // Try the generated index.js
-        path.resolve(process.cwd(), 'index.js'),
-        // Development paths
-        path.resolve(__dirname, '../../threader.node'),
-        path.resolve(__dirname, '../../index.js')
-      ]
-
-      for (const binPath of possiblePaths) {
-        try {
-          if (require('fs').existsSync(binPath)) {
-            this.rustBackend = require(binPath)
-            if (
-              this.rustBackend &&
-              this.rustBackend.isRustAvailable &&
-              this.rustBackend.isRustAvailable()
-            ) {
-              console.log(`✅ Rust backend loaded from: ${binPath}`)
-              return
-            }
-          }
-        } catch (err) {
-          // Continue to next path
+      if (require('fs').existsSync(binPath)) {
+        const backend = require(binPath)
+        if (
+          backend?.OptimizedMultiCoreExecutor &&
+          backend.is_optimized_multicore_available?.()
+        ) {
+          console.log(`🦀 Enhanced Rust backend loaded: ${binPath}`)
+          return new backend.OptimizedMultiCoreExecutor()
+        }
+        // Fallback to simple backend
+        if (backend?.MultiCoreExecutor && backend.isMulticoreAvailable?.()) {
+          console.log(`🦀 Basic Rust backend loaded: ${binPath}`)
+          return new backend.MultiCoreExecutor()
         }
       }
     } catch (error) {
-      console.warn('⚠️ Rust backend not available, using JavaScript fallback')
+      // Continue to next path
     }
   }
 
-  /**
-   * Execute a threader using the worker pool
-   */
-  async execute<R>(threader: Threader<any, R>): Promise<R> {
-    const task = serializeTask(threader.fn, threader.data)
-    const timeout = threader.options.timeout || this.config.timeout || 30000
+  console.log('📦 Rust backend not available, using JavaScript workers')
+  return null
+}
 
-    // If we have Rust backend and simple task, use it directly for better performance
-    if (this.rustBackend && this.canUseRustDirect(task)) {
-      return this.executeWithRust(task)
-    }
+const canUseRustBackend = (threader: Threader<any, any>): boolean => {
+  const {rustHints} = threader.optimizationData
+  return rustHints.shouldUseRust
+}
 
-    return new Promise<R>((resolve, reject) => {
-      const pendingTask: PendingTask = {
-        task,
-        resolve,
-        reject,
-        timeout,
-        timeoutId: setTimeout(() => {
-          reject(new ThreadTimeoutError(timeout))
-        }, timeout)
-      }
+const executeWithRust = async <R>(
+  rustBackend: any,
+  threader: Threader<any, R>
+): Promise<R> => {
+  try {
+    const {optimizationData} = threader
 
-      this.taskQueue.push(pendingTask)
-      this.processQueue()
-    })
-  }
+    // Use enhanced Rust backend if available
+    if (rustBackend.submit_optimized_task) {
+      const optimizationHints = JSON.stringify({
+        operation_type: optimizationData.rustHints.operationType,
+        complexity: optimizationData.functionAnalysis.complexity,
+        expected_cores: optimizationData.rustHints.expectedCores,
+        should_use_rust: true,
+        is_hot_function: optimizationData.functionAnalysis.isHotFunction,
+        estimated_memory: optimizationData.functionAnalysis.estimatedMemory,
+        batch_size_hint: optimizationData.batchStrategy.optimalBatchSize,
+        function_hash: optimizationData.functionAnalysis.fnHash
+      })
 
-  /**
-   * Check if we can use Rust backend directly for simple tasks
-   */
-  private canUseRustDirect(task: SerializedTask): boolean {
-    if (!this.rustBackend) return false
-
-    // Clean the function string - remove outer parentheses and normalize spacing
-    let funcString = task.functionString.trim()
-    if (funcString.startsWith('(') && funcString.endsWith(')')) {
-      funcString = funcString.slice(1, -1)
-    }
-    funcString = funcString.replace(/\s+/g, '')
-
-    // Simple patterns that Rust can handle directly
-    const simplePatterns = [
-      /^x=>x\*2$/, // x=>x*2
-      /^x=>x\+5$/, // x=>x+5
-      /^x=>x\+10$/, // x=>x+10
-      /^x=>x\+100$/, // x=>x+100
-      /^x=>x\.length$/, // x=>x.length
-      /^x=>x\.toUpperCase\(\)$/, // x=>x.toUpperCase()
-      /^x=>x\*x$/, // x=>x*x
-      /^x=>x\*3$/, // x=>x*3
-      /^x=>x\.toLowerCase\(\)$/ // x=>x.toLowerCase()
-    ]
-
-    const matches = simplePatterns.some(pattern => pattern.test(funcString))
-
-    if (matches) {
-      //console.log(`🦀 Using Rust for: ${funcString}`)
-    } else {
-      //console.log(`🟨 Using JS worker for: ${task.functionString}`)
-    }
-
-    return matches
-  }
-
-  /**
-   * Execute using Rust backend directly
-   */
-  private async executeWithRust<R>(task: SerializedTask): Promise<R> {
-    try {
-      if (this.rustBackend.SimpleThreader) {
-        const threader = new this.rustBackend.SimpleThreader()
-        const result = threader.executeSimple(task.functionString, task.data)
-        return JSON.parse(result)
-      } else {
-        throw new Error('SimpleThreader not available')
-      }
-    } catch (error) {
-      console.warn(
-        `🟨 Rust execution failed for "${task.functionString}", falling back to worker:`,
-        error.message
+      const taskId = await rustBackend.submit_optimized_task(
+        threader.fn.toString(),
+        optimizationData.serializedData.format === 'json'
+          ? optimizationData.serializedData.buffer
+          : JSON.stringify(threader.data),
+        optimizationHints
       )
-      // Fallback to worker execution
-      return this.executeWithWorker(task)
-    }
-  }
 
-  /**
-   * Execute using worker thread
-   */
-  private async executeWithWorker<R>(task: SerializedTask): Promise<R> {
-    return new Promise<R>((resolve, reject) => {
-      const pendingTask: PendingTask = {
-        task,
-        resolve,
-        reject,
-        timeout: 30000,
-        timeoutId: setTimeout(() => {
-          reject(new ThreadTimeoutError(30000))
-        }, 30000)
+      const resultJson = await rustBackend.get_optimized_result(30000)
+      const parsed = JSON.parse(resultJson)
+
+      if (parsed.error) {
+        throw new Error(parsed.error)
       }
 
-      this.taskQueue.push(pendingTask)
-      this.processQueue()
-    })
-  }
-
-  /**
-   * Update configuration
-   */
-  updateConfig(config: ThreadConfig): void {
-    this.config = {...this.config, ...config}
-
-    // Adjust worker pool size if needed
-    const targetWorkerCount = config.maxWorkers || this.config.maxWorkers || 4
-
-    if (targetWorkerCount > this.workers.length) {
-      // Add more workers
-      const additionalWorkers = targetWorkerCount - this.workers.length
-      for (let i = 0; i < additionalWorkers; i++) {
-        this.createWorker()
-      }
-    } else if (targetWorkerCount < this.workers.length) {
-      // Remove excess workers
-      const excessWorkers = this.workers.length - targetWorkerCount
-      for (let i = 0; i < excessWorkers; i++) {
-        const worker = this.availableWorkers.pop() || this.workers.pop()
-        if (worker) {
-          this.terminateWorker(worker)
-        }
-      }
-    }
-  }
-
-  /**
-   * Shutdown all workers and clean up
-   */
-  async shutdown(): Promise<void> {
-    // Clear task queue first
-    this.taskQueue.forEach(task => {
-      clearTimeout(task.timeoutId)
-      task.reject(new Error('Worker manager shutting down'))
-    })
-    this.taskQueue = []
-
-    // Terminate all workers gracefully
-    const terminationPromises = this.workers.map(async worker => {
-      try {
-        // Send a gentle shutdown signal first
-        worker.worker.postMessage({type: 'SHUTDOWN'})
-
-        // Give workers a moment to finish
-        await new Promise(resolve => setTimeout(resolve, 50))
-
-        // Then terminate
-        await this.terminateWorker(worker)
-      } catch (error) {
-        // Suppress errors during shutdown
-      }
-    })
-
-    await Promise.allSettled(terminationPromises)
-    this.workers = []
-    this.availableWorkers = []
-  }
-
-  /**
-   * Initialize the worker pool
-   */
-  private initializeWorkers(): void {
-    const workerCount = this.config.maxWorkers || 4
-
-    for (let i = 0; i < workerCount; i++) {
-      this.createWorker()
-    }
-  }
-
-  /**
-   * Create a new worker
-   */
-  private createWorker(): WorkerWrapper {
-    // Always use JavaScript worker for now
-    return this.createJavaScriptWorker()
-  }
-
-  /**
-   * Create a JavaScript fallback worker
-   */
-  private createJavaScriptWorker(): WorkerWrapper {
-    const workerPath = path.join(__dirname, '../../workers/js-worker.js')
-    const worker = new Worker(workerPath)
-
-    const wrapper: WorkerWrapper = {
-      worker,
-      busy: false,
-      tasks: new Map()
+      return parseRustResult(parsed.result)
     }
 
-    this.setupWorkerListeners(wrapper)
-    this.workers.push(wrapper)
-    this.availableWorkers.push(wrapper)
+    // Fallback to basic Rust backend
+    if (rustBackend.submitTask) {
+      const taskId = await rustBackend.submitTask(
+        threader.fn.toString(),
+        optimizationData.serializedData.format === 'json'
+          ? optimizationData.serializedData.buffer
+          : JSON.stringify(threader.data)
+      )
 
-    return wrapper
+      const resultJson = await rustBackend.getResult(30000)
+      const parsed = JSON.parse(resultJson)
+
+      if (parsed.error) {
+        throw new Error(parsed.error)
+      }
+
+      return parseRustResult(parsed.result)
+    }
+
+    throw new Error('Rust backend not properly initialized')
+  } catch (error) {
+    // Fall back to JavaScript worker
+    throw new Error(`Rust execution failed: ${error.message}`)
+  }
+}
+
+const parseRustResult = (result: any): any => {
+  if (typeof result === 'string') {
+    // Handle quoted strings from Rust
+    if (result.startsWith('"') && result.endsWith('"')) {
+      return result.slice(1, -1)
+    }
+    // Try parsing as JSON
+    try {
+      return JSON.parse(result)
+    } catch {
+      return result
+    }
+  }
+  return result
+}
+
+// ============================================================================
+// WORKER THREAD MANAGEMENT (Pure Functions)
+// ============================================================================
+
+const createWorkerInstance = (id: string): WorkerInstance => {
+  const workerPath = path.join(__dirname, '../../workers/js-worker.js')
+  const worker = new Worker(workerPath)
+
+  return {
+    id,
+    worker,
+    busy: false,
+    tasks: new Map(),
+    createdAt: Date.now(),
+    executionCount: 0
+  }
+}
+
+const updateWorkerInstance = (
+  worker: WorkerInstance,
+  updates: Partial<Pick<WorkerInstance, 'busy' | 'executionCount'>>
+): WorkerInstance => ({
+  ...worker,
+  ...updates
+})
+
+const addTaskToWorker = (
+  worker: WorkerInstance,
+  taskId: string,
+  task: PendingTask
+): WorkerInstance => ({
+  ...worker,
+  tasks: new Map(worker.tasks.set(taskId, task)),
+  busy: true
+})
+
+const removeTaskFromWorker = (
+  worker: WorkerInstance,
+  taskId: string
+): WorkerInstance => {
+  const newTasks = new Map(worker.tasks)
+  newTasks.delete(taskId)
+
+  return {
+    ...worker,
+    tasks: newTasks,
+    busy: newTasks.size > 0,
+    executionCount: worker.executionCount + 1
+  }
+}
+
+const executeWithWorkerThread = async <R>(
+  state: WorkerManagerState,
+  threader: Threader<any, R>
+): Promise<R> => {
+  return new Promise<R>((resolve, reject) => {
+    const taskId = `task_${Date.now()}_${Math.random()
+      .toString(36)
+      .substr(2, 9)}`
+    const timeout = threader.options.timeout || state.config.timeout || 30000
+
+    const timeoutId = setTimeout(() => {
+      reject(new Error(`Worker timeout after ${timeout}ms`))
+    }, timeout)
+
+    const pendingTask: PendingTask = {
+      taskId,
+      threader,
+      resolve,
+      reject,
+      timeout,
+      timeoutId,
+      startTime: Date.now()
+    }
+
+    // Add to queue - actual processing handled by state management
+    processTaskQueue({
+      ...state,
+      taskQueue: [...state.taskQueue, pendingTask]
+    })
+  })
+}
+
+const processTaskQueue = (state: WorkerManagerState): WorkerManagerState => {
+  if (state.taskQueue.length === 0 || state.availableWorkers.length === 0) {
+    return state
   }
 
-  /**
-   * Setup event listeners for a worker
-   */
-  private setupWorkerListeners(wrapper: WorkerWrapper): void {
-    wrapper.worker.on('message', message => {
-      this.handleWorkerMessage(wrapper, message)
+  const [nextTask, ...remainingTasks] = state.taskQueue
+  const [availableWorker, ...remainingAvailable] = state.availableWorkers
+
+  // Assign task to worker
+  const updatedWorker = addTaskToWorker(
+    availableWorker,
+    nextTask.taskId,
+    nextTask
+  )
+
+  // Send optimized task to worker
+  const taskMessage = {
+    id: nextTask.taskId,
+    fnString: nextTask.threader.fn.toString(),
+    data:
+      nextTask.threader.optimizationData.serializedData.format === 'json'
+        ? nextTask.threader.optimizationData.serializedData.buffer
+        : JSON.stringify(nextTask.threader.data),
+    serializedData: nextTask.threader.optimizationData.serializedData,
+    optimizationHints: {
+      operationType: nextTask.threader.optimizationData.rustHints.operationType,
+      complexity:
+        nextTask.threader.optimizationData.functionAnalysis.complexity,
+      isHotFunction:
+        nextTask.threader.optimizationData.functionAnalysis.isHotFunction,
+      estimatedMemory:
+        nextTask.threader.optimizationData.functionAnalysis.estimatedMemory
+    },
+    timeout: nextTask.timeout
+  }
+
+  // Send with transferables if available
+  try {
+    const transferables =
+      nextTask.threader.optimizationData.serializedData.transferables || []
+    updatedWorker.worker.postMessage(taskMessage, transferables)
+  } catch (error) {
+    updatedWorker.worker.postMessage(taskMessage)
+  }
+
+  return {
+    ...state,
+    taskQueue: remainingTasks,
+    availableWorkers: remainingAvailable,
+    workers: state.workers.map(w =>
+      w.id === updatedWorker.id ? updatedWorker : w
+    )
+  }
+}
+
+// ============================================================================
+// MAIN WORKER MANAGER API (Pure Functional)
+// ============================================================================
+
+export const createWorkerManager = (
+  config: ThreadConfig = {}
+): WorkerManagerAPI => {
+  // Initialize state
+  let state: WorkerManagerState = {
+    workers: [],
+    availableWorkers: [],
+    taskQueue: [],
+    config: {
+      maxWorkers: config.maxWorkers || Math.max(1, os.cpus().length - 1),
+      timeout: config.timeout || 30000,
+      enableValidation: config.enableValidation || false,
+      transferMode: config.transferMode || 'auto'
+    },
+    rustBackend: loadRustBackend(),
+    isShuttingDown: false
+  }
+
+  // Initialize workers
+  const workerCount = state.config.maxWorkers!
+  const initialWorkers = Array.from({length: workerCount}, (_, i) =>
+    createWorkerInstance(`worker_${i}`)
+  )
+
+  // Setup worker event listeners
+  initialWorkers.forEach(setupWorkerListeners)
+
+  state = {
+    ...state,
+    workers: initialWorkers,
+    availableWorkers: [...initialWorkers]
+  }
+
+  // ============================================================================
+  // EVENT HANDLERS (Pure Functions)
+  // ============================================================================
+
+  function setupWorkerListeners(workerInstance: WorkerInstance): void {
+    workerInstance.worker.on('message', (message: any) => {
+      handleWorkerMessage(workerInstance.id, message)
     })
 
-    wrapper.worker.on('error', error => {
-      this.handleWorkerError(wrapper, error)
+    workerInstance.worker.on('error', (error: Error) => {
+      handleWorkerError(workerInstance.id, error)
     })
 
-    wrapper.worker.on('exit', code => {
-      this.handleWorkerExit(wrapper, code)
+    workerInstance.worker.on('exit', (code: number) => {
+      handleWorkerExit(workerInstance.id, code)
     })
   }
 
-  /**
-   * Handle message from worker
-   */
-  private handleWorkerMessage(wrapper: WorkerWrapper, message: any): void {
-    const {taskId, result, error} = message
+  function handleWorkerMessage(workerId: string, message: any): void {
+    if (state.isShuttingDown) return
 
-    const pendingTask = wrapper.tasks.get(taskId)
-    if (!pendingTask) {
+    const {taskId, success, result, error, duration} = message
+    const worker = state.workers.find(w => w.id === workerId)
+    const task = worker?.tasks.get(taskId)
+
+    if (!worker || !task) {
       console.warn(`Received result for unknown task: ${taskId}`)
       return
     }
 
     // Clear timeout
-    clearTimeout(pendingTask.timeoutId)
-    wrapper.tasks.delete(taskId)
+    clearTimeout(task.timeoutId)
 
-    // Mark worker as available
-    if (wrapper.tasks.size === 0) {
-      wrapper.busy = false
-      this.availableWorkers.push(wrapper)
-      this.processQueue()
+    // Update worker state
+    const updatedWorker = removeTaskFromWorker(worker, taskId)
+
+    state = {
+      ...state,
+      workers: state.workers.map(w => (w.id === workerId ? updatedWorker : w)),
+      availableWorkers: updatedWorker.busy
+        ? state.availableWorkers
+        : [...state.availableWorkers, updatedWorker]
     }
 
-    // Resolve or reject the task
-    if (error) {
-      pendingTask.reject(new Error(error))
+    // Resolve/reject task
+    if (success) {
+      task.resolve(result)
     } else {
-      pendingTask.resolve(result)
+      task.reject(new Error(error || 'Worker execution failed'))
+    }
+
+    // Process next task in queue
+    state = processTaskQueue(state)
+  }
+
+  function handleWorkerError(workerId: string, error: Error): void {
+    console.error(`Worker ${workerId} error:`, error)
+    replaceWorker(workerId)
+  }
+
+  function handleWorkerExit(workerId: string, code: number): void {
+    if (code !== 0 && !state.isShuttingDown) {
+      console.error(`Worker ${workerId} exited with code ${code}`)
+      replaceWorker(workerId)
     }
   }
 
-  /**
-   * Handle worker error
-   */
-  private handleWorkerError(wrapper: WorkerWrapper, error: Error): void {
-    console.error('Worker error:', error)
+  function replaceWorker(workerId: string): void {
+    const worker = state.workers.find(w => w.id === workerId)
+    if (!worker) return
 
     // Reject all pending tasks for this worker
-    wrapper.tasks.forEach(task => {
+    worker.tasks.forEach(task => {
       clearTimeout(task.timeoutId)
-      task.reject(error)
+      task.reject(new Error('Worker failed and was replaced'))
     })
-    wrapper.tasks.clear()
-
-    // Replace the worker
-    this.replaceWorker(wrapper)
-  }
-
-  /**
-   * Handle worker exit
-   */
-  private handleWorkerExit(wrapper: WorkerWrapper, code: number): void {
-    if (code !== 0) {
-      console.error(`Worker exited with code ${code}`)
-      this.replaceWorker(wrapper)
-    }
-  }
-
-  /**
-   * Replace a failed worker
-   */
-  private replaceWorker(oldWrapper: WorkerWrapper): void {
-    // Remove from worker arrays
-    const workerIndex = this.workers.indexOf(oldWrapper)
-    if (workerIndex >= 0) {
-      this.workers.splice(workerIndex, 1)
-    }
-
-    const availableIndex = this.availableWorkers.indexOf(oldWrapper)
-    if (availableIndex >= 0) {
-      this.availableWorkers.splice(availableIndex, 1)
-    }
 
     // Create replacement worker
-    this.createWorker()
-  }
+    const newWorker = createWorkerInstance(`worker_${Date.now()}`)
+    setupWorkerListeners(newWorker)
 
-  /**
-   * Terminate a worker
-   */
-  private async terminateWorker(wrapper: WorkerWrapper): Promise<void> {
-    try {
-      await wrapper.worker.terminate()
-    } catch (error) {
-      console.warn('Error terminating worker:', error.message)
+    state = {
+      ...state,
+      workers: state.workers.map(w => (w.id === workerId ? newWorker : w)),
+      availableWorkers: state.availableWorkers
+        .filter(w => w.id !== workerId)
+        .concat(newWorker)
     }
   }
 
-  /**
-   * Process the task queue
-   */
-  private processQueue(): void {
-    while (this.taskQueue.length > 0 && this.availableWorkers.length > 0) {
-      const task = this.taskQueue.shift()!
-      const worker = this.availableWorkers.shift()!
+  // ============================================================================
+  // PUBLIC API (Pure Functions)
+  // ============================================================================
 
-      worker.busy = true
-      worker.tasks.set(task.task.id, task)
+  const execute = async <R>(threader: Threader<any, R>): Promise<R> => {
+    if (state.isShuttingDown) {
+      throw new Error('Worker manager is shutting down')
+    }
 
-      // Send task to worker with proper data serialization
-      const taskData = {
-        ...task.task,
-        data: task.task.data // data is already JSON string from serialization
-      }
-
-      // Get transferables but handle Node.js environment safely
+    // Use pre-calculated optimization hints from 2-phase system
+    if (state.rustBackend && canUseRustBackend(threader)) {
       try {
-        const transferables = getTransferables(JSON.parse(task.task.data))
-        worker.worker.postMessage(taskData, transferables)
+        return await executeWithRust(state.rustBackend, threader)
       } catch (error) {
-        // If transferables fail, send without them
-        worker.worker.postMessage(taskData)
+        console.warn(
+          `Rust execution failed, falling back to worker: ${error.message}`
+        )
+        // Fall through to worker execution
       }
     }
+
+    // Execute with JavaScript worker using optimized data
+    return executeWithWorkerThread(state, threader)
+  }
+
+  const executeBatch = async <R>(
+    threaders: ReadonlyArray<Threader<any, R>>
+  ): Promise<R[]> => {
+    if (threaders.length === 0) return []
+
+    // Use pre-calculated batching strategy from first threader
+    const batchStrategy = threaders[0]?.optimizationData.batchStrategy
+
+    if (
+      batchStrategy?.shouldBatch &&
+      threaders.length > batchStrategy.optimalBatchSize
+    ) {
+      // Process in optimal batches
+      const results: R[] = []
+      for (
+        let i = 0;
+        i < threaders.length;
+        i += batchStrategy.optimalBatchSize
+      ) {
+        const batch = threaders.slice(i, i + batchStrategy.optimalBatchSize)
+        const batchResults = await Promise.all(batch.map(execute))
+        results.push(...batchResults)
+      }
+      return results
+    }
+
+    // Execute all in parallel
+    return Promise.all(threaders.map(execute))
+  }
+
+  const updateConfig = (newConfig: Partial<ThreadConfig>): WorkerManagerAPI => {
+    const updatedConfig = {...state.config, ...newConfig}
+
+    // Handle worker count changes
+    const targetWorkerCount = updatedConfig.maxWorkers!
+    const currentWorkerCount = state.workers.length
+
+    if (targetWorkerCount > currentWorkerCount) {
+      // Add workers
+      const additionalWorkers = Array.from(
+        {length: targetWorkerCount - currentWorkerCount},
+        (_, i) => createWorkerInstance(`worker_${Date.now()}_${i}`)
+      )
+      additionalWorkers.forEach(setupWorkerListeners)
+
+      state = {
+        ...state,
+        config: updatedConfig,
+        workers: [...state.workers, ...additionalWorkers],
+        availableWorkers: [...state.availableWorkers, ...additionalWorkers]
+      }
+    } else if (targetWorkerCount < currentWorkerCount) {
+      // Remove excess workers
+      const excessWorkers = state.workers.slice(targetWorkerCount)
+      excessWorkers.forEach(worker => {
+        worker.worker.terminate()
+      })
+
+      state = {
+        ...state,
+        config: updatedConfig,
+        workers: state.workers.slice(0, targetWorkerCount),
+        availableWorkers: state.availableWorkers.filter(
+          w => !excessWorkers.some(ew => ew.id === w.id)
+        )
+      }
+    } else {
+      state = {...state, config: updatedConfig}
+    }
+
+    return createWorkerManager(updatedConfig)
+  }
+
+  const shutdown = async (): Promise<void> => {
+    state = {...state, isShuttingDown: true}
+
+    // Clear task queue
+    state.taskQueue.forEach(task => {
+      clearTimeout(task.timeoutId)
+      task.reject(new Error('Worker manager shutting down'))
+    })
+
+    // Shutdown all workers gracefully
+    const shutdownPromises = state.workers.map(async worker => {
+      try {
+        worker.worker.postMessage({type: 'SHUTDOWN'})
+        await new Promise(resolve => setTimeout(resolve, 100))
+        await worker.worker.terminate()
+      } catch (error) {
+        // Suppress shutdown errors
+      }
+    })
+
+    await Promise.allSettled(shutdownPromises)
+
+    // Clear state
+    state = {
+      ...state,
+      workers: [],
+      availableWorkers: [],
+      taskQueue: []
+    }
+  }
+
+  const getStats = (): WorkerStats => ({
+    totalWorkers: state.workers.length,
+    availableWorkers: state.availableWorkers.length,
+    queuedTasks: state.taskQueue.length,
+    totalExecutions: state.workers.reduce(
+      (sum, w) => sum + w.executionCount,
+      0
+    ),
+    rustBackendAvailable: !!state.rustBackend
+  })
+
+  return {
+    execute,
+    executeBatch,
+    updateConfig,
+    shutdown,
+    getStats
   }
 }
 
-/**
- * Wrapper for worker thread with additional state
- */
-interface WorkerWrapper {
-  worker: Worker
-  busy: boolean
-  tasks: Map<string, PendingTask>
+// ============================================================================
+// CONVENIENCE EXPORTS
+// ============================================================================
+
+export const createOptimizedWorkerManager = createWorkerManager
+
+// Singleton instance for global use (optional)
+let globalWorkerManager: WorkerManagerAPI | null = null
+
+export const getGlobalWorkerManager = (
+  config?: ThreadConfig
+): WorkkerManagerAPI => {
+  if (!globalWorkerManager) {
+    globalWorkerManager = createWorkerManager(config)
+  }
+  return globalWorkerManager
 }
 
-/**
- * Pending task waiting for execution or completion
- */
-interface PendingTask {
-  task: SerializedTask
-  resolve: (result: any) => void
-  reject: (error: Error) => void
-  timeout: number
-  timeoutId: NodeJS.Timeout
+export const shutdownGlobalWorkerManager = async (): Promise<void> => {
+  if (globalWorkerManager) {
+    await globalWorkerManager.shutdown()
+    globalWorkerManager = null
+  }
 }

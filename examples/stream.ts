@@ -1,4 +1,4 @@
-// test/realistic-stream-test.ts - Test with realistic timing differences
+// examples/stream.ts - Test with realistic timing differences
 import {performance} from 'perf_hooks'
 import {threader, thread} from '../src/index'
 
